@@ -38,11 +38,6 @@ Contributions are welcome! If you have any ideas, suggestions, or bug reports, p
 
 This project is licensed under the [MIT License](LICENSE).
 
-1. Clone the repository.
-2. Install the required dependencies using `pip install -r requirements.txt`.
-3. Configure the necessary settings in `config.py`.
-4. Run the application using `python main.py`.
-
 ## Usage
 
 1. Prepare the data to be imported in the specified format.
