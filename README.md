@@ -6,9 +6,8 @@ This project is designed to import data into the FOLIO LSP. It provides a simple
 
 ## Features
 
-- Data import from multiple sources
-- Seamless integration with Python folio application
-- Easy configuration and customization
+- Import MARC records using FOLIO's Data Import system
+- Import User records using FOLIO's User APIs
 
 ## Installation
 
