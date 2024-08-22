@@ -37,17 +37,3 @@ Contributions are welcome! If you have any ideas, suggestions, or bug reports, p
 ## License
 
 This project is licensed under the [MIT License](LICENSE).
-
-## Usage
-
-1. Prepare the data to be imported in the specified format.
-2. Run the application and follow the prompts to import the data.
-3. Monitor the import progress and handle any errors or conflicts that may arise.
-
-## Contributing
-
-Contributions are welcome! If you have any ideas, suggestions, or bug reports, please open an issue or submit a pull request.
-
-## License
-
-This project is licensed under the [MIT License](LICENSE).
