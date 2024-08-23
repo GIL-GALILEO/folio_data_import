@@ -10,7 +10,6 @@ from pathlib import Path
 import aiofiles
 import folioclient
 import httpx
-from networkx import line_graph
 
 try:
     utc = datetime.UTC
@@ -543,7 +542,7 @@ class UserImporter(object):
             await self.map_address_types(user_obj, line_number)
             await self.map_patron_groups(user_obj, line_number)
             await self.map_departments(user_obj, line_number)
-            new_user_obj = await self.create_or_update_user(user_obj, existing_user)
+            new_user_obj = await self.create_or_update_user(user_obj, existing_user, line_number)
             if new_user_obj:
                 try:
                     if existing_rp or rp_obj:
