@@ -189,6 +189,30 @@ class UserImporter(object):
                 )
                 del user_obj["patronGroup"]
 
+    async def map_departments(self, user_obj, department_map):
+        """
+        Maps the departments of a user object using the provided department map.
+
+        Args:
+            user_obj (dict): The user object to update.
+            department_map (dict): A dictionary mapping department names.
+
+        Returns:
+            None
+        """
+        mapped_departments = []
+        for department in user_obj["departments"]:
+            try:
+                mapped_departments.append(department_map[department])
+            except KeyError:
+                print(
+                    f"Department \"{department}\" not found, excluding department from user"
+                )
+                await self.logfile.write(
+                    f"Department \"{department}\" not found, excluding department from user\n"
+                )
+        user_obj["departments"] = mapped_departments
+
     async def update_existing_user(self, user_obj, existing_user):
         """
         Updates an existing user with the provided user object.
@@ -442,6 +466,7 @@ class UserImporter(object):
         user: str,
         patron_group_map: dict,
         address_type_map: dict,
+        department_map: dict,
     ):
         """
         Process a single line of user data.
@@ -466,6 +491,7 @@ class UserImporter(object):
             )
             await self.map_address_types(user_obj, address_type_map)
             await self.map_patron_groups(user_obj, patron_group_map)
+            await self.map_departments(user_obj, department_map)
             new_user_obj = await self.create_or_update_user(user_obj, existing_user)
             if new_user_obj:
                 try:
@@ -509,6 +535,10 @@ class UserImporter(object):
             x["addressType"]: x["id"]
             for x in self.folio_client.folio_get_all("/addresstypes", "addressTypes")
         }
+        department_map = {
+            x["name"]: x["id"]
+            for x in self.folio_client.folio_get_all("/departments", "departments")
+        }
         with open(self.user_file_path, "r", encoding="utf-8") as openfile:
             tasks = []
             for user in openfile:
@@ -517,6 +547,7 @@ class UserImporter(object):
                         user,
                         patron_group_map,
                         address_type_map,
+                        department_map,
                     )
                 )
                 if len(tasks) == self.batch_size:
