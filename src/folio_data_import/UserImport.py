@@ -21,11 +21,10 @@ except AttributeError:
 
 class UserImporter(object):
     """
-    Class to import users from a JSON-lines file into FOLIO
+    Class to import mod-user-import compatible user objects 
+    (eg. from folio_migration_tools UserTransformer task) 
+    from a JSON-lines file into FOLIO
     """
-    patron_group_map: dict
-    address_type_map: dict
-    department_map: dict
 
     def __init__(
         self,
