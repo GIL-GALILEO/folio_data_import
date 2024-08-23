@@ -10,6 +10,7 @@ from pathlib import Path
 import aiofiles
 import folioclient
 import httpx
+from networkx import line_graph
 
 try:
     utc = datetime.UTC
@@ -23,6 +24,9 @@ class UserImporter(object):
     """
     Class to import users from a JSON-lines file into FOLIO
     """
+    patron_group_map: dict
+    address_type_map: dict
+    department_map: dict
 
     def __init__(
         self,
@@ -41,6 +45,9 @@ class UserImporter(object):
         self.folio_client = folio_client
         self.library_name = library_name
         self.user_file_path = user_file_path
+        self.patron_group_map = self.build_patron_group_map(self.folio_client)
+        self.address_type_map = self.build_address_type_map(self.folio_client)
+        self.department_map = self.build_department_map(self.folio_client)
         self.logfile = logfile
         self.errorfile = errorfile
         self.http_client = http_client
@@ -48,6 +55,54 @@ class UserImporter(object):
         self.lock = asyncio.Lock()
         self.logs: dict = {"created": 0, "updated": 0, "failed": 0}
 
+    @staticmethod
+    def build_patron_group_map(folio_client: folioclient.FolioClient) -> dict:
+        """
+        Builds a patron group map.
+
+        Args:
+            folio_client (folioclient.FolioClient): A FolioClient object.
+
+        Returns:
+            dict: A dictionary mapping patron group names to their corresponding IDs.
+        """
+        return {
+            x["group"]: x["id"]
+            for x in folio_client.folio_get_all("/groups", "usergroups")
+        }
+    
+    @staticmethod
+    def build_address_type_map(folio_client: folioclient.FolioClient) -> dict:
+        """
+        Builds an address type map.
+
+        Args:
+            folio_client (folioclient.FolioClient): A FolioClient object.
+
+        Returns:
+            dict: A dictionary mapping address type names to their corresponding IDs.
+        """
+        return {
+            x["addressType"]: x["id"]
+            for x in folio_client.folio_get_all("/addresstypes", "addressTypes")
+        }
+    
+    @staticmethod
+    def build_department_map(folio_client: folioclient.FolioClient) -> dict:
+        """
+        Builds a department map.
+
+        Args:
+            folio_client (folioclient.FolioClient): A FolioClient object.
+
+        Returns:
+            dict: A dictionary mapping department names to their corresponding IDs.
+        """
+        return {
+            x["name"]: x["id"]
+            for x in folio_client.folio_get_all("/departments", "departments")
+        }
+    
     async def do_import(self):
         """
         Main method to import users.
@@ -133,7 +188,7 @@ class UserImporter(object):
             existing_pu = {}
         return existing_pu
 
-    async def map_address_types(self, user_obj, address_type_map):
+    async def map_address_types(self, user_obj, line_number):
         """
         Maps the address type IDs in the user object to the corresponding values in the address_type_map.
 
@@ -151,22 +206,22 @@ class UserImporter(object):
         if "personal" in user_obj and "addresses" in user_obj["personal"]:
             for address in user_obj["personal"]["addresses"]:
                 try:
-                    address["addressTypeId"] = address_type_map[
+                    address["addressTypeId"] = self.address_type_map[
                         address["addressTypeId"]
                     ]
                 except KeyError:
-                    if address["addressTypeId"] not in address_type_map.values():
+                    if address["addressTypeId"] not in self.address_type_map.values():
                         print(
-                            f"Address type {address['addressTypeId']} not found, removing address"
+                            f"Row {line_number}: Address type {address['addressTypeId']} not found, removing address"
                         )
                         await self.logfile.write(
-                            f"Address type {address['addressTypeId']} not found, removing address\n"
+                            f"Row {line_number}: Address type {address['addressTypeId']} not found, removing address\n"
                         )
                         del address
             if len(user_obj["personal"]["addresses"]) == 0:
                 del user_obj["personal"]["addresses"]
 
-    async def map_patron_groups(self, user_obj, patron_group_map):
+    async def map_patron_groups(self, user_obj, line_number):
         """
         Maps the patron group of a user object using the provided patron group map.
 
@@ -178,18 +233,18 @@ class UserImporter(object):
             None
         """
         try:
-            user_obj["patronGroup"] = patron_group_map[user_obj["patronGroup"]]
+            user_obj["patronGroup"] = self.patron_group_map[user_obj["patronGroup"]]
         except KeyError:
-            if user_obj["patronGroup"] not in patron_group_map.values():
+            if user_obj["patronGroup"] not in self.patron_group_map.values():
                 print(
-                    f"Patron group {user_obj['patronGroup']} not found, removing patron group"
+                    f"Row {line_number}: Patron group {user_obj['patronGroup']} not found, removing patron group"
                 )
                 await self.logfile.write(
-                    f"Patron group {user_obj['patronGroup']} not found in, removing patron group\n"
+                    f"Row {line_number}: Patron group {user_obj['patronGroup']} not found in, removing patron group\n"
                 )
                 del user_obj["patronGroup"]
 
-    async def map_departments(self, user_obj, department_map):
+    async def map_departments(self, user_obj, line_number):
         """
         Maps the departments of a user object using the provided department map.
 
@@ -203,13 +258,13 @@ class UserImporter(object):
         mapped_departments = []
         for department in user_obj["departments"]:
             try:
-                mapped_departments.append(department_map[department])
+                mapped_departments.append(self.department_map[department])
             except KeyError:
                 print(
-                    f"Department \"{department}\" not found, excluding department from user"
+                    f"Row {line_number}: Department \"{department}\" not found, excluding department from user"
                 )
                 await self.logfile.write(
-                    f"Department \"{department}\" not found, excluding department from user\n"
+                    f"Row {line_number}: Department \"{department}\" not found, excluding department from user\n"
                 )
         user_obj["departments"] = mapped_departments
 
@@ -278,7 +333,7 @@ class UserImporter(object):
             self.logs["created"] += 1
         return response.json()
 
-    async def create_or_update_user(self, user_obj, existing_user):
+    async def create_or_update_user(self, user_obj, existing_user, line_number):
         """
         Creates or updates a user based on the given user object and existing user.
 
@@ -300,10 +355,10 @@ class UserImporter(object):
                 return existing_user
             except Exception as e:
                 print(
-                    f"User update failed: {str(getattr(getattr(e, 'response', str(e)), 'text', str(e)))}"
+                    f"Row {line_number}: User update failed: {str(getattr(getattr(e, 'response', str(e)), 'text', str(e)))}"
                 )
                 await self.logfile.write(
-                    f"User update failed: {str(getattr(getattr(e, 'response', str(e)), 'text', str(e)))}\n"
+                    f"Row {line_number}: User update failed: {str(getattr(getattr(e, 'response', str(e)), 'text', str(e)))}\n"
                 )
                 await self.errorfile.write(
                     json.dumps(existing_user, ensure_ascii=False) + "\n"
@@ -316,10 +371,10 @@ class UserImporter(object):
                 return new_user
             except Exception as e:
                 print(
-                    f"User creation failed: {str(getattr(getattr(e, 'response', str(e)), 'text', str(e)))}"
+                    f"Row {line_number}: User creation failed: {str(getattr(getattr(e, 'response', str(e)), 'text', str(e)))}"
                 )
                 await self.logfile.write(
-                    f"User creation failed: {str(getattr(getattr(e, 'response', str(e)), 'text', str(e)))}\n"
+                    f"Row {line_number}: User creation failed: {str(getattr(getattr(e, 'response', str(e)), 'text', str(e)))}\n"
                 )
                 await self.errorfile.write(
                     json.dumps(user_obj, ensure_ascii=False) + "\n"
@@ -464,9 +519,7 @@ class UserImporter(object):
     async def process_line(
         self,
         user: str,
-        patron_group_map: dict,
-        address_type_map: dict,
-        department_map: dict,
+        line_number: int,
     ):
         """
         Process a single line of user data.
@@ -474,8 +527,6 @@ class UserImporter(object):
         Args:
             user (str): The user data to be processed.
             logs (dict): A dictionary to store logs.
-            patron_group_map (dict): A dictionary mapping patron groups.
-            address_type_map (dict): A dictionary mapping address types.
 
         Returns:
             None
@@ -489,9 +540,9 @@ class UserImporter(object):
             rp_obj, existing_user, existing_rp, existing_pu = (
                 await self.process_existing_user(user_obj)
             )
-            await self.map_address_types(user_obj, address_type_map)
-            await self.map_patron_groups(user_obj, patron_group_map)
-            await self.map_departments(user_obj, department_map)
+            await self.map_address_types(user_obj, line_number)
+            await self.map_patron_groups(user_obj, line_number)
+            await self.map_departments(user_obj, line_number)
             new_user_obj = await self.create_or_update_user(user_obj, existing_user)
             if new_user_obj:
                 try:
@@ -501,15 +552,15 @@ class UserImporter(object):
                         )
                     else:
                         print(
-                            f"Creating default request preference object for {new_user_obj['id']}"
+                            f"Row {line_number}: Creating default request preference object for {new_user_obj['id']}"
                         )
                         await self.logfile.write(
-                            f"Creating default request preference object for {new_user_obj['id']}\n"
+                            f"Row {line_number}: Creating default request preference object for {new_user_obj['id']}\n"
                         )
                         await self.create_new_rp(new_user_obj)
                 except Exception as ee:
                     rp_error_message = (
-                        f"Error creating or updating request preferences for "
+                        f"Row {line_number}: Error creating or updating request preferences for "
                         f"{new_user_obj['id']}: "
                         f"{str(getattr(getattr(ee, 'response', ee), 'text', str(ee)))}"
                     )
@@ -520,35 +571,21 @@ class UserImporter(object):
                         await self.create_perms_user(new_user_obj)
                     except Exception as ee:
                         pu_error_message = (
-                            f"Error creating permissionUser object for user: {new_user_obj['id']}: "
+                            f"Row {line_number}: Error creating permissionUser object for user: {new_user_obj['id']}: "
                             f"{str(getattr(getattr(ee, 'response', str(ee)), 'text', str(ee)))}"
                         )
                         print(pu_error_message)
                         await self.logfile.write(pu_error_message + "\n")
 
     async def process_file(self):
-        patron_group_map = {
-            x["group"]: x["id"]
-            for x in self.folio_client.folio_get_all("/groups", "usergroups")
-        }
-        address_type_map = {
-            x["addressType"]: x["id"]
-            for x in self.folio_client.folio_get_all("/addresstypes", "addressTypes")
-        }
-        department_map = {
-            x["name"]: x["id"]
-            for x in self.folio_client.folio_get_all("/departments", "departments")
-        }
+        """
+        Process the user object file.
+        """
         with open(self.user_file_path, "r", encoding="utf-8") as openfile:
             tasks = []
-            for user in openfile:
+            for line_number, user in enumerate(openfile):
                 tasks.append(
-                    self.process_line(
-                        user,
-                        patron_group_map,
-                        address_type_map,
-                        department_map,
-                    )
+                    self.process_line(user, line_number)
                 )
                 if len(tasks) == self.batch_size:
                     start = time.time()
