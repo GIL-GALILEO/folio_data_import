@@ -5,11 +5,13 @@ import getpass
 import json
 import os
 import time
+from datetime import datetime as dt
 from pathlib import Path
 
 import aiofiles
 import folioclient
 import httpx
+from aiofiles.threadpool.text import AsyncTextIOWrapper
 
 try:
     utc = datetime.UTC
@@ -19,7 +21,7 @@ except AttributeError:
     utc = zoneinfo.ZoneInfo("UTC")
 
 
-class UserImporter(object):
+class UserImporter:
     """
     Class to import mod-user-import compatible user objects 
     (eg. from folio_migration_tools UserTransformer task) 
@@ -33,8 +35,8 @@ class UserImporter(object):
         user_file_path: Path,
         batch_size: int,
         limit_simultaneous_requests: asyncio.Semaphore,
-        logfile,
-        errorfile,
+        logfile: AsyncTextIOWrapper,
+        errorfile: AsyncTextIOWrapper,
         http_client: httpx.AsyncClient,
         only_update_present_fields: bool = False,
     ) -> None:
@@ -188,17 +190,17 @@ class UserImporter(object):
 
     async def map_address_types(self, user_obj, line_number):
         """
-        Maps the address type IDs in the user object to the corresponding values in the address_type_map.
+        Maps address type names in the user object to the corresponding ID in the address_type_map.
 
         Args:
             user_obj (dict): The user object containing personal information.
-            address_type_map (dict): A dictionary mapping address type IDs to their corresponding values.
+            address_type_map (dict): A dictionary mapping address type names to their ID values.
 
         Returns:
             None
 
         Raises:
-            KeyError: If an address type ID in the user object is not found in the address_type_map.
+            KeyError: If an address type name in the user object is not found in address_type_map.
 
         """
         if "personal" in user_obj and "addresses" in user_obj["personal"]:
@@ -210,10 +212,12 @@ class UserImporter(object):
                 except KeyError:
                     if address["addressTypeId"] not in self.address_type_map.values():
                         print(
-                            f"Row {line_number}: Address type {address['addressTypeId']} not found, removing address"
+                            f"Row {line_number}: Address type {address['addressTypeId']} not found"
+                            f", removing address"
                         )
                         await self.logfile.write(
-                            f"Row {line_number}: Address type {address['addressTypeId']} not found, removing address\n"
+                            f"Row {line_number}: Address type {address['addressTypeId']} not found"
+                            f", removing address\n"
                         )
                         del address
             if len(user_obj["personal"]["addresses"]) == 0:
@@ -235,10 +239,12 @@ class UserImporter(object):
         except KeyError:
             if user_obj["patronGroup"] not in self.patron_group_map.values():
                 print(
-                    f"Row {line_number}: Patron group {user_obj['patronGroup']} not found, removing patron group"
+                    f"Row {line_number}: Patron group {user_obj['patronGroup']} not found, "
+                    f"removing patron group"
                 )
                 await self.logfile.write(
-                    f"Row {line_number}: Patron group {user_obj['patronGroup']} not found in, removing patron group\n"
+                    f"Row {line_number}: Patron group {user_obj['patronGroup']} not found in, "
+                    f"removing patron group\n"
                 )
                 del user_obj["patronGroup"]
 
@@ -259,10 +265,12 @@ class UserImporter(object):
                 mapped_departments.append(self.department_map[department])
             except KeyError:
                 print(
-                    f"Row {line_number}: Department \"{department}\" not found, excluding department from user"
+                    f"Row {line_number}: Department \"{department}\" not found, "
+                    f"excluding department from user"
                 )
                 await self.logfile.write(
-                    f"Row {line_number}: Department \"{department}\" not found, excluding department from user\n"
+                    f"Row {line_number}: Department \"{department}\" not found, "
+                    f"excluding department from user\n"
                 )
         user_obj["departments"] = mapped_departments
 
@@ -275,7 +283,7 @@ class UserImporter(object):
             existing_user (dict): The existing user object to be updated.
 
         Returns:
-            tuple: A tuple containing the updated existing user object and the response from the API call.
+            tuple: A tuple containing the updated existing user object and the API response.
 
         Raises:
             None
@@ -341,7 +349,7 @@ class UserImporter(object):
             logs (dict): A dictionary to keep track of the number of updates and failures.
 
         Returns:
-            dict: The updated or created user object, or an empty dictionary if the operation fails.
+            dict: The updated or created user object, or an empty dictionary an error occurs.
         """
         if existing_user:
             existing_user, update_user = await self.update_existing_user(
@@ -353,10 +361,12 @@ class UserImporter(object):
                 return existing_user
             except Exception as e:
                 print(
-                    f"Row {line_number}: User update failed: {str(getattr(getattr(e, 'response', str(e)), 'text', str(e)))}"
+                    f"Row {line_number}: User update failed: "
+                    f"{str(getattr(getattr(e, 'response', str(e)), 'text', str(e)))}"
                 )
                 await self.logfile.write(
-                    f"Row {line_number}: User update failed: {str(getattr(getattr(e, 'response', str(e)), 'text', str(e)))}\n"
+                    f"Row {line_number}: User update failed: "
+                    f"{str(getattr(getattr(e, 'response', str(e)), 'text', str(e)))}\n"
                 )
                 await self.errorfile.write(
                     json.dumps(existing_user, ensure_ascii=False) + "\n"
@@ -369,10 +379,12 @@ class UserImporter(object):
                 return new_user
             except Exception as e:
                 print(
-                    f"Row {line_number}: User creation failed: {str(getattr(getattr(e, 'response', str(e)), 'text', str(e)))}"
+                    f"Row {line_number}: User creation failed: "
+                    f"{str(getattr(getattr(e, 'response', str(e)), 'text', str(e)))}"
                 )
                 await self.logfile.write(
-                    f"Row {line_number}: User creation failed: {str(getattr(getattr(e, 'response', str(e)), 'text', str(e)))}\n"
+                    f"Row {line_number}: User creation failed: "
+                    f"{str(getattr(getattr(e, 'response', str(e)), 'text', str(e)))}\n"
                 )
                 await self.errorfile.write(
                     json.dumps(user_obj, ensure_ascii=False) + "\n"
@@ -550,10 +562,12 @@ class UserImporter(object):
                         )
                     else:
                         print(
-                            f"Row {line_number}: Creating default request preference object for {new_user_obj['id']}"
+                            f"Row {line_number}: Creating default request preference object"
+                            f" for {new_user_obj['id']}"
                         )
                         await self.logfile.write(
-                            f"Row {line_number}: Creating default request preference object for {new_user_obj['id']}\n"
+                            f"Row {line_number}: Creating default request preference object"
+                            f" for {new_user_obj['id']}\n"
                         )
                         await self.create_new_rp(new_user_obj)
                 except Exception as ee:
@@ -569,7 +583,8 @@ class UserImporter(object):
                         await self.create_perms_user(new_user_obj)
                     except Exception as ee:
                         pu_error_message = (
-                            f"Row {line_number}: Error creating permissionUser object for user: {new_user_obj['id']}: "
+                            f"Row {line_number}: Error creating permissionUser object for user: "
+                            f"{new_user_obj['id']}: "
                             f"{str(getattr(getattr(ee, 'response', str(ee)), 'text', str(ee)))}"
                         )
                         print(pu_error_message)
@@ -591,10 +606,10 @@ class UserImporter(object):
                     duration = time.time() - start
                     async with self.lock:
                         message = (
-                            f"{datetime.datetime.now().isoformat(sep=' ', timespec='milliseconds')}: "
-                            f"Batch of {self.batch_size} users processed in {duration:.2f} seconds. - "
-                            f"Users created: {self.logs['created']} - Users updated: {self.logs['updated']} - "
-                            f"Users failed: {self.logs['failed']}"
+                            f"{dt.now().isoformat(sep=' ', timespec='milliseconds')}: "
+                            f"Batch of {self.batch_size} users processed in {duration:.2f} "
+                            f"seconds. - Users created: {self.logs['created']} - Users updated: "
+                            f"{self.logs['updated']} - Users failed: {self.logs['failed']}"
                         )
                         print(message)
                         await self.logfile.write(message + "\n")
@@ -603,10 +618,10 @@ class UserImporter(object):
                 await asyncio.gather(*tasks)
                 async with self.lock:
                     message = (
-                        f"{datetime.datetime.now().isoformat(sep=' ', timespec='milliseconds')}: "
+                        f"{dt.now().isoformat(sep=' ', timespec='milliseconds')}: "
                         f"Batch of {self.batch_size} users processed in {duration:.2f} seconds. - "
-                        f"Users created: {self.logs['created']} - Users updated: {self.logs['updated']} - "
-                        f"Users failed: {self.logs['failed']}"
+                        f"Users created: {self.logs['created']} - Users updated: "
+                        f"{self.logs['updated']} - Users failed: {self.logs['failed']}"
                     )
                     print(message)
                     await self.logfile.write(message + "\n")
@@ -624,8 +639,8 @@ async def main():
         --username (str): The FOLIO username.
         --okapi_url (str): The Okapi URL.
         --user_file_path (str): The path to the user file.
-        --limit_async_requests (int): Limit how many http requests can be made at once. Default is 10.
-        --batch_size (int): How many user records to process before logging statistics. Default is 250.
+        --limit_async_requests (int): Limit how many http requests can be made at once. Default 10.
+        --batch_size (int): How many records to process before logging statistics. Default 250.
         --folio_password (str): The FOLIO password.
 
     Raises:
@@ -673,11 +688,11 @@ async def main():
     log_file_path = (
         user_file_path.parent.parent
         / "reports"
-        / f"log_user_import_{datetime.datetime.now(utc).strftime('%Y%m%d_%H%M%S')}.log"
+        / f"log_user_import_{dt.now(utc).strftime('%Y%m%d_%H%M%S')}.log"
     )
     error_file_path = (
         user_file_path.parent
-        / f"failed_user_import_{datetime.datetime.now(utc).strftime('%Y%m%d_%H%M%S')}.txt"
+        / f"failed_user_import_{dt.now(utc).strftime('%Y%m%d_%H%M%S')}.txt"
     )
     async with aiofiles.open(
         log_file_path,

@@ -7,6 +7,7 @@ from typing import List
 import uuid
 from contextlib import ExitStack
 import datetime
+from datetime import datetime as dt
 from getpass import getpass
 from pathlib import Path
 from time import sleep
@@ -30,20 +31,20 @@ except AttributeError:
 REPORT_SUMMARY_ORDERING = {"created": 0, "updated": 1, "discarded": 2, "error": 3}
 
 
-class MARCImportJob(object):
+class MARCImportJob:
     """
-    Class to manage importing MARC data (Bib, Authority) into FOLIO using the Change Manager 
-    APIs (#TODO link to GitHub docs), rather than file-based Data Import. When executed in an 
-    interactive environment, it can provide progress bars for tracking the number of records both 
-    uploaded and processed.
+    Class to manage importing MARC data (Bib, Authority) into FOLIO using the Change Manager
+    APIs (https://github.com/folio-org/mod-source-record-manager/tree/master?tab=readme-ov-file#data-import-workflow),
+    rather than file-based Data Import. When executed in an interactive environment, it can provide progress bars
+    for tracking the number of records both uploaded and processed.
 
     Args:
         folio_client (FolioClient): An instance of the FolioClient class.
         marc_files (list): A list of Path objects representing the MARC files to import.
         import_profile_name (str): The name of the data import job profile to use.
-        batch_size (int): The number of source records to include in a record batch sent to FOLIO (default=10).
+        batch_size (int): The number of source records to include in a record batch (default=10).
         batch_delay (float): The number of seconds to wait between record batches (default=0).
-        consolidate (bool): Consolidate records into a single job. Default is to create a new job for each MARC file.
+        consolidate (bool): Consolidate files into a single job. Default is one job for each file.
         no_progress (bool): Disable progress bars (eg. for running in a CI environment).
     """
     bad_records_file: io.TextIOWrapper
@@ -53,6 +54,12 @@ class MARCImportJob(object):
     pbar_sent: tqdm
     pbar_imported: tqdm
     http_client: httpx.Client
+    current_file: List[Path]
+    record_batch: List[dict] = []
+    error_records: int = 0
+    last_current: int = 0
+    total_records_sent: int = 0
+    finished: bool = False
 
     def __init__(
         self,
@@ -68,15 +75,9 @@ class MARCImportJob(object):
         self.no_progress = no_progress
         self.folio_client: folioclient.FolioClient = folio_client
         self.import_files = marc_files
-        self.current_file = None
         self.import_profile_name = import_profile_name
         self.batch_size = batch_size
         self.batch_delay = batch_delay
-        self.record_batch = []
-        self.error_records = 0
-        self.last_current = 0
-        self.total_records_sent = 0
-        self.finished = False
 
     async def do_work(self):
         """
@@ -92,12 +93,12 @@ class MARCImportJob(object):
         """
         with httpx.Client() as http_client, open(
             self.import_files[0].parent.joinpath(
-                f"bad_marc_records_{datetime.datetime.now(tz=datetime_utc).strftime('%Y%m%d%H%M%S')}.mrc"
+                f"bad_marc_records_{dt.now(tz=datetime_utc).strftime('%Y%m%d%H%M%S')}.mrc"
             ),
             "wb+",
         ) as bad_marc_file, open(
             self.import_files[0].parent.joinpath(
-                f"failed_batches_{datetime.datetime.now(tz=datetime_utc).strftime('%Y%m%d%H%M%S')}.mrc"
+                f"failed_batches_{dt.now(tz=datetime_utc).strftime('%Y%m%d%H%M%S')}.mrc"
             ),
             "wb+",
         ) as failed_batches:
