@@ -197,6 +197,9 @@ class MARCImportJob:
         self.job_id = create_job.json()["parentJobExecutionId"]
 
     async def get_import_profile(self):
+        """
+        Retrieves the import profile with the specified name.
+        """
         import_profiles = self.folio_client.folio_get(
             "/data-import-profiles/jobProfiles",
             "jobProfiles",
@@ -261,6 +264,12 @@ class MARCImportJob:
         return total_records
 
     async def process_record_batch(self, batch_payload):
+        """
+        Processes a record batch.
+
+        Args:
+            batch_payload (dict): A records payload containing the current batch of MARC records. 
+        """
         post_batch = self.http_client.post(
             self.folio_client.okapi_url
             + f"/change-manager/jobExecutions/{self.job_id}/records",
@@ -352,7 +361,7 @@ class MARCImportJob:
         6. Processes the records and updates the progress bars.
         7. Checks the job status periodically until the import is finished.
 
-        Note: This method assumes that the necessary instance variables are already set.
+        Note: This method assumes that the necessary instance attributes are already set.
 
         Returns:
             None
@@ -418,6 +427,11 @@ class MARCImportJob:
 
 
 async def main():
+    """
+    Main function to run the MARC import job.
+
+    This function parses command line arguments, initializes the FolioClient, and runs the MARCImportJob.
+    """
     parser = argparse.ArgumentParser()
     parser.add_argument("--gateway_url", type=str, help="The FOLIO API Gateway URL")
     parser.add_argument("--tenant_id", type=str, help="The FOLIO tenant ID")
@@ -500,6 +514,9 @@ async def main():
 
 
 def sync_main():
+    """
+    Synchronous main function to run the MARC import job.
+    """
     asyncio.run(main())
 
 
