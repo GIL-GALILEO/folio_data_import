@@ -1,10 +1,12 @@
-import asyncio
-import folioclient
 import argparse
+import asyncio
 import glob
-import inquirer
-from pathlib import Path
 from getpass import getpass
+from pathlib import Path
+
+import folioclient
+import inquirer
+
 from folio_data_import.MARCDataImport import MARCImportJob
 
 
