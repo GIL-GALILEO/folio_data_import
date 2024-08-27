@@ -47,6 +47,7 @@ class MARCImportJob:
         consolidate (bool): Consolidate files into a single job. Default is one job for each file.
         no_progress (bool): Disable progress bars (eg. for running in a CI environment).
     """
+
     bad_records_file: io.TextIOWrapper
     failed_batches_file: io.TextIOWrapper
     job_id: str
@@ -70,7 +71,7 @@ class MARCImportJob:
         batch_delay=0,
         consolidate=False,
         no_progress=False,
-    ):
+    ) -> None:
         self.consolidate_files = consolidate
         self.no_progress = no_progress
         self.folio_client: folioclient.FolioClient = folio_client
@@ -79,11 +80,11 @@ class MARCImportJob:
         self.batch_size = batch_size
         self.batch_delay = batch_delay
 
-    async def do_work(self):
+    async def do_work(self) -> None:
         """
         Performs the necessary work for data import.
 
-        This method initializes an HTTP client, files to store records that fail to send, 
+        This method initializes an HTTP client, files to store records that fail to send,
         and calls `self.import_marc_records` to import MARC files. If `consolidate_files` is True,
         it imports all the files specified in `import_files` as a single batch. Otherwise,
         it imports each file as a separate import job.
@@ -116,7 +117,7 @@ class MARCImportJob:
                     await self.import_marc_file()
             await self.wrap_up()
 
-    async def wrap_up(self):
+    async def wrap_up(self) -> None:
         """
         Wraps up the data import process.
 
@@ -137,7 +138,7 @@ class MARCImportJob:
         print("Import complete.")
         print(f"Total records imported: {self.total_records_sent}")
 
-    async def get_job_status(self):
+    async def get_job_status(self) -> None:
         """
         Retrieves the status of a job execution.
 
@@ -169,7 +170,7 @@ class MARCImportJob:
             self.last_current = status["progress"]["current"]
             self.finished = True
 
-    async def create_folio_import_job(self):
+    async def create_folio_import_job(self) -> None:
         """
         Creates a job execution for importing data into FOLIO.
 
@@ -196,7 +197,7 @@ class MARCImportJob:
             raise e
         self.job_id = create_job.json()["parentJobExecutionId"]
 
-    async def get_import_profile(self):
+    async def get_import_profile(self) -> None:
         """
         Retrieves the import profile with the specified name.
         """
@@ -212,7 +213,7 @@ class MARCImportJob:
         ][0]
         self.job_import_profile = profile
 
-    async def set_job_profile(self):
+    async def set_job_profile(self) -> None:
         """
         Sets the job profile for the current job execution.
 
@@ -241,9 +242,8 @@ class MARCImportJob:
                 + getattr(getattr(e, "response", ""), "text", "")
             )
             raise e
-        return set_job_profile
 
-    async def read_total_records(self, files):
+    async def read_total_records(self, files) -> int:
         """
         Reads the total number of records from the given files.
 
@@ -263,12 +263,12 @@ class MARCImportJob:
             import_file.seek(0)
         return total_records
 
-    async def process_record_batch(self, batch_payload):
+    async def process_record_batch(self, batch_payload) -> None:
         """
         Processes a record batch.
 
         Args:
-            batch_payload (dict): A records payload containing the current batch of MARC records. 
+            batch_payload (dict): A records payload containing the current batch of MARC records.
         """
         post_batch = self.http_client.post(
             self.folio_client.okapi_url
@@ -290,7 +290,7 @@ class MARCImportJob:
             self.record_batch = []
         sleep(self.batch_delay)
 
-    async def process_records(self, files, total_records):
+    async def process_records(self, files, total_records) -> None:
         """
         Process records from the given files.
 
@@ -325,7 +325,7 @@ class MARCImportJob:
                     await self.create_batch_payload(counter, total_records, True),
                 )
 
-    async def create_batch_payload(self, counter, total_records, is_last):
+    async def create_batch_payload(self, counter, total_records, is_last) -> dict:
         """
         Create a batch payload for data import.
 
@@ -348,7 +348,7 @@ class MARCImportJob:
             "initialRecords": [{"record": x.decode()} for x in self.record_batch],
         }
 
-    async def import_marc_file(self):
+    async def import_marc_file(self) -> None:
         """
         Imports MARC file into the system.
 
@@ -426,11 +426,12 @@ class MARCImportJob:
             self.finished = False
 
 
-async def main():
+async def main() -> None:
     """
     Main function to run the MARC import job.
 
-    This function parses command line arguments, initializes the FolioClient, and runs the MARCImportJob.
+    This function parses command line arguments, initializes the FolioClient,
+    and runs the MARCImportJob.
     """
     parser = argparse.ArgumentParser()
     parser.add_argument("--gateway_url", type=str, help="The FOLIO API Gateway URL")
@@ -463,7 +464,10 @@ async def main():
     parser.add_argument(
         "--consolidate",
         action="store_true",
-        help="Consolidate records into a single job. Default is to create a new job for each MARC file.",
+        help=(
+            "Consolidate records into a single job. "
+            "Default is to create a new job for each MARC file."
+        ),
     )
     parser.add_argument(
         "--no-progress",
@@ -513,7 +517,7 @@ async def main():
         raise
 
 
-def sync_main():
+def sync_main() -> None:
     """
     Synchronous main function to run the MARC import job.
     """

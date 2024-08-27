@@ -7,6 +7,7 @@ import os
 import time
 from datetime import datetime as dt
 from pathlib import Path
+from typing import Tuple
 
 import aiofiles
 import folioclient
@@ -23,8 +24,8 @@ except AttributeError:
 
 class UserImporter:
     """
-    Class to import mod-user-import compatible user objects 
-    (eg. from folio_migration_tools UserTransformer task) 
+    Class to import mod-user-import compatible user objects
+    (eg. from folio_migration_tools UserTransformer task)
     from a JSON-lines file into FOLIO
     """
 
@@ -42,68 +43,43 @@ class UserImporter:
     ) -> None:
         self.limit_simultaneous_requests = limit_simultaneous_requests
         self.batch_size = batch_size
-        self.folio_client = folio_client
-        self.library_name = library_name
-        self.user_file_path = user_file_path
-        self.patron_group_map = self.build_patron_group_map(self.folio_client)
-        self.address_type_map = self.build_address_type_map(self.folio_client)
-        self.department_map = self.build_department_map(self.folio_client)
-        self.logfile = logfile
-        self.errorfile = errorfile
-        self.http_client = http_client
-        self.only_update_present_fields = only_update_present_fields
-        self.lock = asyncio.Lock()
+        self.folio_client: folioclient.FolioClient = folio_client
+        self.library_name: str = library_name
+        self.user_file_path: Path = user_file_path
+        self.patron_group_map: dict = self.build_ref_data_id_map(
+            self.folio_client, "/groups", "usergroups", "group"
+        )
+        self.address_type_map: dict = self.build_ref_data_id_map(
+            self.folio_client, "/addresstypes", "addressTypes", "addressType"
+        )
+        self.department_map: dict = self.build_ref_data_id_map(
+            self.folio_client, "/departments", "departments", "name"
+        )
+        self.logfile: AsyncTextIOWrapper = logfile
+        self.errorfile: AsyncTextIOWrapper = errorfile
+        self.http_client: httpx.AsyncClient = http_client
+        self.only_update_present_fields: bool = only_update_present_fields
+        self.lock: asyncio.Lock = asyncio.Lock()
         self.logs: dict = {"created": 0, "updated": 0, "failed": 0}
 
     @staticmethod
-    def build_patron_group_map(folio_client: folioclient.FolioClient) -> dict:
+    def build_ref_data_id_map(
+        folio_client: folioclient.FolioClient, endpoint: str, key: str, name: str
+    ) -> dict:
         """
-        Builds a patron group map.
+        Builds a map of reference data IDs.
 
         Args:
             folio_client (folioclient.FolioClient): A FolioClient object.
+            endpoint (str): The endpoint to retrieve the reference data from.
+            key (str): The key to use as the map key.
 
         Returns:
-            dict: A dictionary mapping patron group names to their corresponding IDs.
+            dict: A dictionary mapping reference data keys to their corresponding IDs.
         """
-        return {
-            x["group"]: x["id"]
-            for x in folio_client.folio_get_all("/groups", "usergroups")
-        }
-    
-    @staticmethod
-    def build_address_type_map(folio_client: folioclient.FolioClient) -> dict:
-        """
-        Builds an address type map.
+        return {x[name]: x["id"] for x in folio_client.folio_get_all(endpoint, key)}
 
-        Args:
-            folio_client (folioclient.FolioClient): A FolioClient object.
-
-        Returns:
-            dict: A dictionary mapping address type names to their corresponding IDs.
-        """
-        return {
-            x["addressType"]: x["id"]
-            for x in folio_client.folio_get_all("/addresstypes", "addressTypes")
-        }
-    
-    @staticmethod
-    def build_department_map(folio_client: folioclient.FolioClient) -> dict:
-        """
-        Builds a department map.
-
-        Args:
-            folio_client (folioclient.FolioClient): A FolioClient object.
-
-        Returns:
-            dict: A dictionary mapping department names to their corresponding IDs.
-        """
-        return {
-            x["name"]: x["id"]
-            for x in folio_client.folio_get_all("/departments", "departments")
-        }
-    
-    async def do_import(self):
+    async def do_import(self) -> None:
         """
         Main method to import users.
 
@@ -111,7 +87,7 @@ class UserImporter:
         """
         await self.process_file()
 
-    async def get_existing_user(self, user_obj):
+    async def get_existing_user(self, user_obj) -> dict:
         """
         Retrieves an existing user from FOLIO based on the provided user object.
 
@@ -135,7 +111,7 @@ class UserImporter:
             existing_user = {}
         return existing_user
 
-    async def get_existing_rp(self, user_obj, existing_user):
+    async def get_existing_rp(self, user_obj, existing_user) -> dict:
         """
         Retrieves the existing request preferences for a given user.
 
@@ -162,7 +138,7 @@ class UserImporter:
             existing_rp = {}
         return existing_rp
 
-    async def get_existing_pu(self, user_obj, existing_user):
+    async def get_existing_pu(self, user_obj, existing_user) -> dict:
         """
         Retrieves the existing permission user for a given user.
 
@@ -188,7 +164,7 @@ class UserImporter:
             existing_pu = {}
         return existing_pu
 
-    async def map_address_types(self, user_obj, line_number):
+    async def map_address_types(self, user_obj, line_number) -> None:
         """
         Maps address type names in the user object to the corresponding ID in the address_type_map.
 
@@ -223,7 +199,7 @@ class UserImporter:
             if len(user_obj["personal"]["addresses"]) == 0:
                 del user_obj["personal"]["addresses"]
 
-    async def map_patron_groups(self, user_obj, line_number):
+    async def map_patron_groups(self, user_obj, line_number) -> None:
         """
         Maps the patron group of a user object using the provided patron group map.
 
@@ -248,7 +224,7 @@ class UserImporter:
                 )
                 del user_obj["patronGroup"]
 
-    async def map_departments(self, user_obj, line_number):
+    async def map_departments(self, user_obj, line_number) -> None:
         """
         Maps the departments of a user object using the provided department map.
 
@@ -265,16 +241,16 @@ class UserImporter:
                 mapped_departments.append(self.department_map[department])
             except KeyError:
                 print(
-                    f"Row {line_number}: Department \"{department}\" not found, "
+                    f'Row {line_number}: Department "{department}" not found, '
                     f"excluding department from user"
                 )
                 await self.logfile.write(
-                    f"Row {line_number}: Department \"{department}\" not found, "
+                    f'Row {line_number}: Department "{department}" not found, '
                     f"excluding department from user\n"
                 )
         user_obj["departments"] = mapped_departments
 
-    async def update_existing_user(self, user_obj, existing_user):
+    async def update_existing_user(self, user_obj, existing_user) -> Tuple[dict, dict]:
         """
         Updates an existing user with the provided user object.
 
@@ -316,7 +292,7 @@ class UserImporter:
         )
         return existing_user, create_update_user
 
-    async def create_new_user(self, user_obj):
+    async def create_new_user(self, user_obj) -> dict:
         """
         Creates a new user in the system.
 
@@ -339,7 +315,7 @@ class UserImporter:
             self.logs["created"] += 1
         return response.json()
 
-    async def create_or_update_user(self, user_obj, existing_user, line_number):
+    async def create_or_update_user(self, user_obj, existing_user, line_number) -> dict:
         """
         Creates or updates a user based on the given user object and existing user.
 
@@ -359,14 +335,14 @@ class UserImporter:
                 update_user.raise_for_status()
                 self.logs["updated"] += 1
                 return existing_user
-            except Exception as e:
+            except Exception as ee:
                 print(
                     f"Row {line_number}: User update failed: "
-                    f"{str(getattr(getattr(e, 'response', str(e)), 'text', str(e)))}"
+                    f"{str(getattr(getattr(ee, 'response', str(ee)), 'text', str(ee)))}"
                 )
                 await self.logfile.write(
                     f"Row {line_number}: User update failed: "
-                    f"{str(getattr(getattr(e, 'response', str(e)), 'text', str(e)))}\n"
+                    f"{str(getattr(getattr(ee, 'response', str(ee)), 'text', str(ee)))}\n"
                 )
                 await self.errorfile.write(
                     json.dumps(existing_user, ensure_ascii=False) + "\n"
@@ -377,14 +353,14 @@ class UserImporter:
             try:
                 new_user = await self.create_new_user(user_obj)
                 return new_user
-            except Exception as e:
+            except Exception as ee:
                 print(
                     f"Row {line_number}: User creation failed: "
-                    f"{str(getattr(getattr(e, 'response', str(e)), 'text', str(e)))}"
+                    f"{str(getattr(getattr(ee, 'response', str(ee)), 'text', str(ee)))}"
                 )
                 await self.logfile.write(
                     f"Row {line_number}: User creation failed: "
-                    f"{str(getattr(getattr(e, 'response', str(e)), 'text', str(e)))}\n"
+                    f"{str(getattr(getattr(ee, 'response', str(ee)), 'text', str(ee)))}\n"
                 )
                 await self.errorfile.write(
                     json.dumps(user_obj, ensure_ascii=False) + "\n"
@@ -392,7 +368,7 @@ class UserImporter:
                 self.logs["failed"] += 1
                 return {}
 
-    async def process_user_obj(self, user: str):
+    async def process_user_obj(self, user: str) -> dict:
         """
         Process a user object.
 
@@ -416,7 +392,7 @@ class UserImporter:
             )
         return user_obj
 
-    async def process_existing_user(self, user_obj):
+    async def process_existing_user(self, user_obj) -> Tuple[dict, dict, dict, dict]:
         """
         Process an existing user.
 
@@ -481,7 +457,7 @@ class UserImporter:
         )
         response.raise_for_status()
 
-    async def update_existing_rp(self, rp_obj, existing_rp):
+    async def update_existing_rp(self, rp_obj, existing_rp) -> None:
         """
         Updates an existing request preference with the provided request preference object.
 
@@ -505,7 +481,7 @@ class UserImporter:
         )
         response.raise_for_status()
 
-    async def create_perms_user(self, new_user_obj):
+    async def create_perms_user(self, new_user_obj) -> None:
         """
         Creates a permissions user object for the given new user.
 
@@ -530,7 +506,7 @@ class UserImporter:
         self,
         user: str,
         line_number: int,
-    ):
+    ) -> None:
         """
         Process a single line of user data.
 
@@ -553,7 +529,9 @@ class UserImporter:
             await self.map_address_types(user_obj, line_number)
             await self.map_patron_groups(user_obj, line_number)
             await self.map_departments(user_obj, line_number)
-            new_user_obj = await self.create_or_update_user(user_obj, existing_user, line_number)
+            new_user_obj = await self.create_or_update_user(
+                user_obj, existing_user, line_number
+            )
             if new_user_obj:
                 try:
                     if existing_rp or rp_obj:
@@ -570,7 +548,7 @@ class UserImporter:
                             f" for {new_user_obj['id']}\n"
                         )
                         await self.create_new_rp(new_user_obj)
-                except Exception as ee:
+                except Exception as ee:  # noqa: W0718
                     rp_error_message = (
                         f"Row {line_number}: Error creating or updating request preferences for "
                         f"{new_user_obj['id']}: "
@@ -581,7 +559,7 @@ class UserImporter:
                 if not existing_pu:
                     try:
                         await self.create_perms_user(new_user_obj)
-                    except Exception as ee:
+                    except Exception as ee:  # noqa: W0718
                         pu_error_message = (
                             f"Row {line_number}: Error creating permissionUser object for user: "
                             f"{new_user_obj['id']}: "
@@ -590,16 +568,14 @@ class UserImporter:
                         print(pu_error_message)
                         await self.logfile.write(pu_error_message + "\n")
 
-    async def process_file(self):
+    async def process_file(self) -> None:
         """
         Process the user object file.
         """
         with open(self.user_file_path, "r", encoding="utf-8") as openfile:
             tasks = []
             for line_number, user in enumerate(openfile):
-                tasks.append(
-                    self.process_line(user, line_number)
-                )
+                tasks.append(self.process_line(user, line_number))
                 if len(tasks) == self.batch_size:
                     start = time.time()
                     await asyncio.gather(*tasks)
@@ -627,7 +603,7 @@ class UserImporter:
                     await self.logfile.write(message + "\n")
 
 
-async def main():
+async def main() -> None:
     """
     Entry point of the user import script.
 
@@ -712,13 +688,13 @@ async def main():
                 http_client,
             )
             await importer.do_import()
-        except Exception as e:
-            print(f"An unknown error occurred: {e}")
-            await logfile.write(f"An error occurred {e}\n")
-            raise e
+        except Exception as ee:
+            print(f"An unknown error occurred: {ee}")
+            await logfile.write(f"An error occurred {ee}\n")
+            raise ee
 
 
-def sync_main():
+def sync_main() -> None:
     """
     Synchronous version of the main function.
 
