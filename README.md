@@ -16,7 +16,7 @@ This project is designed to import data into the FOLIO LSP. It provides a simple
 To install the project using Poetry, follow these steps:
 
 1. Clone the repository.
-2. Navigate to the project directory: `$ cd /path/to/python-folio-data-import`.
+2. Navigate to the project directory: `$ cd /path/to/folio_data_import`.
 3. Install Poetry if you haven't already: `$ pip install poetry`.
 4. Install the project dependencies: `$ poetry install`.
 6. Run the application using Poetry: `$ poetry run python -m folio_data_import --help`.
