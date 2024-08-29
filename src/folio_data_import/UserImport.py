@@ -22,7 +22,7 @@ except AttributeError:
     utc = zoneinfo.ZoneInfo("UTC")
 
 
-class UserImporter:
+class UserImporter:  # noqa: R0902
     """
     Class to import mod-user-import compatible user objects
     (eg. from folio_migration_tools UserTransformer task)
@@ -39,6 +39,7 @@ class UserImporter:
         logfile: AsyncTextIOWrapper,
         errorfile: AsyncTextIOWrapper,
         http_client: httpx.AsyncClient,
+        user_match_key: str = "externalSystemId",
         only_update_present_fields: bool = False,
     ) -> None:
         self.limit_simultaneous_requests = limit_simultaneous_requests
@@ -59,6 +60,7 @@ class UserImporter:
         self.errorfile: AsyncTextIOWrapper = errorfile
         self.http_client: httpx.AsyncClient = http_client
         self.only_update_present_fields: bool = only_update_present_fields
+        self.match_key = user_match_key
         self.lock: asyncio.Lock = asyncio.Lock()
         self.logs: dict = {"created": 0, "updated": 0, "failed": 0}
 
@@ -97,7 +99,7 @@ class UserImporter:
         Returns:
             The existing user object if found, otherwise an empty dictionary.
         """
-        match_key = "id" if ("id" in user_obj) else "externalSystemId"
+        match_key = "id" if ("id" in user_obj) else self.match_key
         try:
             existing_user = await self.http_client.get(
                 self.folio_client.okapi_url + "/users",
@@ -618,6 +620,7 @@ async def main() -> None:
         --limit_async_requests (int): Limit how many http requests can be made at once. Default 10.
         --batch_size (int): How many records to process before logging statistics. Default 250.
         --folio_password (str): The FOLIO password.
+        --user_match_key (str): The key to use to match users. Default "externalSystemId".
 
     Raises:
         Exception: If an unknown error occurs during the import process.
@@ -644,6 +647,17 @@ async def main() -> None:
         default=250,
     )
     parser.add_argument("--folio_password", help="The FOLIO password")
+    parser.add_argument(
+        "--user_match_key",
+        help="The key to use to match users",
+        choices=["externalSystemId", "barcode", "username"],
+        default="externalSystemId",
+    )
+    parser.add_argument(
+        "--update_only_present_fields",
+        help="Only update fields that are present in the user object",
+        action="store_true",
+    )
     args = parser.parse_args()
 
     library_name = args.library_name
@@ -686,6 +700,8 @@ async def main() -> None:
                 logfile,
                 errorfile,
                 http_client,
+                args.user_match_key,
+                args.update_only_present_fields,
             )
             await importer.do_import()
         except Exception as ee:
