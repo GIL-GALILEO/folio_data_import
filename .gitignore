@@ -124,3 +124,4 @@ scratch_pad.ipynb
 poetry.lock
 .DS_Store
 *.mrk
+snapshot-users.jsonl

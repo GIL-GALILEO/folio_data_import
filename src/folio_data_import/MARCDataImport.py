@@ -1,6 +1,7 @@
 import argparse
 import asyncio
 import glob
+import importlib
 import io
 import os
 import sys
@@ -73,6 +74,7 @@ class MARCImportJob:
         import_profile_name: str,
         batch_size=10,
         batch_delay=0,
+        marc_record_preprocessor=None,
         consolidate=False,
         no_progress=False,
     ) -> None:
@@ -84,6 +86,7 @@ class MARCImportJob:
         self.batch_size = batch_size
         self.batch_delay = batch_delay
         self.current_retry_timeout = None
+        self.marc_record_preprocessor = marc_record_preprocessor
 
     async def do_work(self) -> None:
         """
@@ -334,6 +337,10 @@ class MARCImportJob:
                     await self.get_job_status()
                     sleep(0.25)
                 if record:
+                    if self.marc_record_preprocessor:
+                        record = await self.apply_marc_record_preprocessing(
+                            record, self.marc_record_preprocessor
+                        )
                     self.record_batch.append(record.as_marc())
                     counter += 1
                 else:
@@ -342,6 +349,39 @@ class MARCImportJob:
                 await self.process_record_batch(
                     await self.create_batch_payload(counter, total_records, True),
                 )
+
+    @staticmethod
+    async def apply_marc_record_preprocessing(record: pymarc.Record, func_or_path) -> pymarc.Record:
+        """
+        Apply preprocessing to the MARC record before sending it to FOLIO.
+
+        Args:
+            record (pymarc.Record): The MARC record to preprocess.
+            func_or_path (Union[Callable, str]): The preprocessing function or its import path.
+
+        Returns:
+            pymarc.Record: The preprocessed MARC record.
+        """
+        if isinstance(func_or_path, str):
+            try:
+                path_parts = func_or_path.rsplit('.')
+                module_path, func_name = ".".join(path_parts[:-1]), path_parts[-1]
+                module = importlib.import_module(module_path)
+                func = getattr(module, func_name)
+            except (ImportError, AttributeError) as e:
+                print(f"Error importing preprocessing function {func_or_path}: {e}. Skipping preprocessing.")
+                return record
+        elif callable(func_or_path):
+            func = func_or_path
+        else:
+            print(f"Invalid preprocessing function: {func_or_path}. Skipping preprocessing.")
+            return record
+
+        try:
+            return func(record)
+        except Exception as e:
+            print(f"Error applying preprocessing function: {e}. Skipping preprocessing.")
+            return record
 
     async def create_batch_payload(self, counter, total_records, is_last) -> dict:
         """
@@ -509,6 +549,15 @@ async def main() -> None:
         default=0.0,
     )
     parser.add_argument(
+        "--preprocessor",
+        type=str,
+        help=(
+            "The path to a Python module containing a preprocessing function "
+            "to apply to each MARC record before sending to FOLIO."
+        ),
+        default=None,
+    )
+    parser.add_argument(
         "--consolidate",
         action="store_true",
         help=(
@@ -570,6 +619,7 @@ async def main() -> None:
             args.import_profile_name,
             batch_size=args.batch_size,
             batch_delay=args.batch_delay,
+            marc_record_preprocessor=args.preprocessor,
             consolidate=bool(args.consolidate),
             no_progress=bool(args.no_progress),
         ).do_work()
