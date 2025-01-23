@@ -903,16 +903,38 @@ async def main() -> None:
     limit_async_requests = asyncio.Semaphore(args.limit_async_requests)
     batch_size = args.batch_size
 
-    folio_client = folioclient.FolioClient(
-        args.okapi_url,
-        args.tenant_id,
-        args.username,
-        args.folio_password
-        or os.environ.get("FOLIO_PASS", "")
-        or getpass.getpass(
-            "Enter your FOLIO password: ",
-        ),
-    )
+    try:
+        folio_client = folioclient.FolioClient(
+            args.okapi_url,
+            args.tenant_id,
+            args.username,
+            args.folio_password
+            or os.environ.get("FOLIO_PASS", "")
+            or getpass.getpass("Enter your FOLIO password: "),
+        )
+    except httpx.HTTPStatusError as e:
+        response_content = ""
+        try:
+            response_content = e.response.content.decode('utf-8').strip()
+        except UnicodeDecodeError:
+            response_content = str(e.response.content)
+
+        error_message = (
+            f"Failed to initialize FOLIO client: HTTP {e.response.status_code} {e.response.reason_phrase}\n"
+            f"URL: {e.request.url}\n"
+            f"Response content: {response_content}\n"
+            f"More details: https://httpstatuses.com/{e.response.status_code}"
+        )
+        print(error_message)
+        raise Exception(error_message) from e
+
+    except httpx.HTTPError as e:
+        print(f"Error initializing FOLIO client: {e}")
+        raise
+
+    except Exception as e:
+        print(f"Unexpected error initializing FOLIO client: {e}")
+        raise
 
     # Set the member tenant id if provided to support FOLIO ECS multi-tenant environments
     if args.member_tenant_id:
