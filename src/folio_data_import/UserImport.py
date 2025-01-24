@@ -920,13 +920,10 @@ async def main() -> None:
             response_content = str(e.response.content)
 
         error_message = (
-            f"Failed to initialize FOLIO client: HTTP {e.response.status_code} {e.response.reason_phrase}\n"
-            f"URL: {e.request.url}\n"
+            f"{e} \n" 
             f"Response content: {response_content}\n"
-            f"More details: https://httpstatuses.com/{e.response.status_code}"
         )
-        print(error_message)
-        raise Exception(error_message) from e
+        raise Exception(error_message) from None
 
     except httpx.HTTPError as e:
         print(f"Error initializing FOLIO client: {e}")
