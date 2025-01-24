@@ -916,6 +916,25 @@ async def main() -> None:
         response_content = ""
         try:
             response_content = e.response.content.decode('utf-8').strip()
+
+            # Try parsing as JSON and extracting specific fields
+            try:
+                response_json = json.loads(response_content)
+                if "errors" in response_json and isinstance(response_json["errors"], list):
+                    error_details = []
+                    for error in response_json["errors"]:
+                        message = error.get("message", "No message provided")
+                        error_type = error.get("type", "No type provided")
+                        code = error.get("code", "No code provided")
+                        error_details.append(f"Type: {error_type}, Code: {code}, Message: {message}")
+
+                    response_content = "\n".join(error_details)
+                else:
+                    response_content = json.dumps(response_json, indent=2)  # Fallback to formatted JSON
+
+            except json.JSONDecodeError:
+                pass  # Keep response_content as is if not valid JSON
+
         except UnicodeDecodeError:
             response_content = str(e.response.content)
 
