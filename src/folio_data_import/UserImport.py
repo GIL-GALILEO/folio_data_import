@@ -94,26 +94,6 @@ class UserImporter:  # noqa: R0902
         """
         return {x[name]: x["id"] for x in folio_client.folio_get_all(endpoint, key)}
 
-    def validate_users(self, users: list) -> None:
-        """
-        Validates the structure of user records.
-
-        Args:
-            users (list): A list of user records loaded from the JSON file.
-
-        Raises:
-            ValueError: If the user structure is invalid.
-        """
-        required_fields = ["externalSystemId", "username", "personal", "patronGroup"]
-
-        for idx, user in enumerate(users):
-            if not all(field in user for field in required_fields):
-                raise ValueError(f"User at line {idx + 1} is missing required fields.")
-            if "personal" in user and not isinstance(user["personal"], dict):
-                raise ValueError(f"User at line {idx + 1}: 'personal' should be a dictionary.")
-
-        print(f"Successfully validated {len(users)} user records.")
-
     async def do_import(self) -> None:
         """
         Main method to import users.
@@ -123,19 +103,6 @@ class UserImporter:  # noqa: R0902
         """
         if self.user_file_path:
             with open(self.user_file_path, "r", encoding="utf-8") as openfile:
-                # Validate JSON structure before processing
-                try:
-                    users = [json.loads(line) for line in openfile]
-                    self.validate_users(users)
-                except json.JSONDecodeError as e:
-                    print(f"Error: Invalid JSON format in the input file. {e}")
-                    return
-                except Exception as e:
-                    print(f"Error reading user file: {e}")
-                    return
-
-                # Reset the file pointer to the beginning before processing
-                openfile.seek(0)
                 await self.process_file(openfile)
         else:
             raise FileNotFoundError("No user objects file provided")
@@ -527,7 +494,7 @@ class UserImporter:  # noqa: R0902
                    and the existing PU object (existing_pu).
         """
         rp_obj = user_obj.pop("requestPreference", {})
-        spu_obj = user_obj.pop("servicePointsUser")
+        spu_obj = user_obj.pop("servicePointsUser", {})
         existing_user = await self.get_existing_user(user_obj)
         if existing_user:
             existing_rp = await self.get_existing_rp(user_obj, existing_user)
@@ -821,8 +788,19 @@ class UserImporter:  # noqa: R0902
             openfile: The file or file-like object to process.
         """
         tasks = []
-        for line_number, user in enumerate(openfile):
-            tasks.append(self.process_line(user, line_number))
+        for line_number, line in enumerate(openfile):
+
+            try:
+                json.loads(line)
+            except json.JSONDecodeError as e:
+                error_message = (
+                    f"Line {line_number} is not valid JSON. Be sure your file is in JSONL format.  "
+                    f"Error: {e} -- Offending content: {line!r}"
+                )
+                await self.logfile.write(error_message + "\n")
+                raise ValueError(error_message)
+
+            tasks.append(self.process_line(line, line_number))
             if len(tasks) == self.batch_size:
                 start = time.time()
                 await asyncio.gather(*tasks)
@@ -830,9 +808,10 @@ class UserImporter:  # noqa: R0902
                 async with self.lock:
                     message = (
                         f"{dt.now().isoformat(sep=' ', timespec='milliseconds')}: "
-                        f"Batch of {self.batch_size} users processed in {duration:.2f} "
-                        f"seconds. - Users created: {self.logs['created']} - Users updated: "
-                        f"{self.logs['updated']} - Users failed: {self.logs['failed']}"
+                        f"Batch of {self.batch_size} users processed in {duration:.2f} seconds. "
+                        f"- Users created: {self.logs['created']} "
+                        f"- Users updated: {self.logs['updated']} "
+                        f"- Users failed: {self.logs['failed']}"
                     )
                     print(message)
                     await self.logfile.write(message + "\n")
@@ -844,9 +823,10 @@ class UserImporter:  # noqa: R0902
             async with self.lock:
                 message = (
                     f"{dt.now().isoformat(sep=' ', timespec='milliseconds')}: "
-                    f"Batch of {len(tasks)} users processed in {duration:.2f} seconds. - "
-                    f"Users created: {self.logs['created']} - Users updated: "
-                    f"{self.logs['updated']} - Users failed: {self.logs['failed']}"
+                    f"Batch of {len(tasks)} users processed in {duration:.2f} seconds. "
+                    f"- Users created: {self.logs['created']} "
+                    f"- Users updated: {self.logs['updated']} "
+                    f"- Users failed: {self.logs['failed']}"
                 )
                 print(message)
                 await self.logfile.write(message + "\n")
