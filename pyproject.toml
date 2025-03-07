@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "folio_data_import"
-version = "0.2.7"
+version = "0.2.8rc8"
 description = "A python module to interact with the data importing capabilities of the open-source FOLIO ILS"
 authors = ["Brooks Travis <brooks.travis@gmail.com>"]
 license = "MIT"
@@ -33,6 +33,7 @@ flake8-docstrings = "^1.7.0"
 pytest = "^8.3.2"
 flake8 = "^7.1.1"
 black = "^24.8.0"
+ipykernel = "^6.29.5"
 
 [build-system]
 requires = ["poetry-core"]

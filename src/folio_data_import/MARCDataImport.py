@@ -1,18 +1,21 @@
 import argparse
 import asyncio
+import datetime
+from email import message
 import glob
 import importlib
 import io
+import logging
 import os
 import sys
-from typing import List
 import uuid
 from contextlib import ExitStack
-import datetime
 from datetime import datetime as dt
+from functools import cached_property
 from getpass import getpass
 from pathlib import Path
 from time import sleep
+from typing import List
 
 import folioclient
 import httpx
@@ -21,7 +24,6 @@ import pymarc
 import tabulate
 from humps import decamelize
 from tqdm import tqdm
-
 
 try:
     datetime_utc = datetime.UTC
@@ -35,6 +37,18 @@ REPORT_SUMMARY_ORDERING = {"created": 0, "updated": 1, "discarded": 2, "error": 
 # Set default timeout and backoff values for HTTP requests when retrying job status and final summary checks
 RETRY_TIMEOUT_START = 1
 RETRY_TIMEOUT_RETRY_FACTOR = 2
+
+# Custom log level for data issues, set to 26
+DATA_ISSUE_LVL_NUM = 26
+logging.addLevelName(DATA_ISSUE_LVL_NUM, "DATA_ISSUES")
+
+def data_issues(self, msg, *args, **kws):
+    if self.isEnabledFor(DATA_ISSUE_LVL_NUM):
+        self._log(DATA_ISSUE_LVL_NUM, msg, args, **kws)
+
+logging.Logger.data_issues = data_issues
+
+logger = logging.getLogger(__name__)
 
 class MARCImportJob:
     """
@@ -56,7 +70,6 @@ class MARCImportJob:
     bad_records_file: io.TextIOWrapper
     failed_batches_file: io.TextIOWrapper
     job_id: str
-    job_import_profile: dict
     pbar_sent: tqdm
     pbar_imported: tqdm
     http_client: httpx.Client
@@ -77,9 +90,11 @@ class MARCImportJob:
         marc_record_preprocessor=None,
         consolidate=False,
         no_progress=False,
+        let_summary_fail=False,
     ) -> None:
         self.consolidate_files = consolidate
         self.no_progress = no_progress
+        self.let_summary_fail = let_summary_fail
         self.folio_client: folioclient.FolioClient = folio_client
         self.import_files = marc_files
         self.import_profile_name = import_profile_name
@@ -87,6 +102,8 @@ class MARCImportJob:
         self.batch_delay = batch_delay
         self.current_retry_timeout = None
         self.marc_record_preprocessor = marc_record_preprocessor
+        self.pbar_sent: tqdm
+        self.pbar_imported: tqdm
 
     async def do_work(self) -> None:
         """
@@ -100,21 +117,25 @@ class MARCImportJob:
         Returns:
             None
         """
-        with httpx.Client() as http_client, open(
-            self.import_files[0].parent.joinpath(
-                f"bad_marc_records_{dt.now(tz=datetime_utc).strftime('%Y%m%d%H%M%S')}.mrc"
-            ),
-            "wb+",
-        ) as bad_marc_file, open(
-            self.import_files[0].parent.joinpath(
-                f"failed_batches_{dt.now(tz=datetime_utc).strftime('%Y%m%d%H%M%S')}.mrc"
-            ),
-            "wb+",
-        ) as failed_batches:
+        with (
+            httpx.Client() as http_client,
+            open(
+                self.import_files[0].parent.joinpath(
+                    f"bad_marc_records_{dt.now(tz=datetime_utc).strftime('%Y%m%d%H%M%S')}.mrc"
+                ),
+                "wb+",
+            ) as bad_marc_file,
+            open(
+                self.import_files[0].parent.joinpath(
+                    f"failed_batches_{dt.now(tz=datetime_utc).strftime('%Y%m%d%H%M%S')}.mrc"
+                ),
+                "wb+",
+            ) as failed_batches,
+        ):
             self.bad_records_file = bad_marc_file
-            print(f"Writing bad records to {self.bad_records_file.name}")
+            logger.info(f"Writing bad records to {self.bad_records_file.name}")
             self.failed_batches_file = failed_batches
-            print(f"Writing failed batches to {self.failed_batches_file.name}")
+            logger.info(f"Writing failed batches to {self.failed_batches_file.name}")
             self.http_client = http_client
             if self.consolidate_files:
                 self.current_file = self.import_files
@@ -135,16 +156,16 @@ class MARCImportJob:
         Returns:
             None
         """
-        self.bad_records_file.seek(0)
-        if not self.bad_records_file.read(1):
-            os.remove(self.bad_records_file.name)
-            print("No bad records found. Removing bad records file.")
-        self.failed_batches_file.seek(0)
-        if not self.failed_batches_file.read(1):
-            os.remove(self.failed_batches_file.name)
-            print("No failed batches. Removing failed batches file.")
-        print("Import complete.")
-        print(f"Total records imported: {self.total_records_sent}")
+        with open(self.bad_records_file.name, "rb") as bad_records:
+            if not bad_records.read(1):
+                os.remove(bad_records.name)
+                logger.info("No bad records found. Removing bad records file.")
+        with open(self.failed_batches_file.name, "rb") as failed_batches:
+            if not failed_batches.read(1):
+                os.remove(failed_batches.name)
+                logger.info("No failed batches. Removing failed batches file.")
+        logger.info("Import complete.")
+        logger.info(f"Total records imported: {self.total_records_sent}")
 
     async def get_job_status(self) -> None:
         """
@@ -158,21 +179,28 @@ class MARCImportJob:
         """
         try:
             self.current_retry_timeout = (
-                self.current_retry_timeout * RETRY_TIMEOUT_RETRY_FACTOR
-            ) if self.current_retry_timeout else RETRY_TIMEOUT_START
+                (self.current_retry_timeout * RETRY_TIMEOUT_RETRY_FACTOR)
+                if self.current_retry_timeout
+                else RETRY_TIMEOUT_START
+            )
             job_status = self.folio_client.folio_get(
                 "/metadata-provider/jobExecutions?statusNot=DISCARDED&uiStatusAny"
                 "=PREPARING_FOR_PREVIEW&uiStatusAny=READY_FOR_PREVIEW&uiStatusAny=RUNNING&limit=50"
             )
             self.current_retry_timeout = None
-        except httpx.ConnectTimeout:
-            sleep(.25)
-            with httpx.Client(
-                timeout=self.current_retry_timeout,
-                verify=self.folio_client.ssl_verify
-            ) as temp_client:
-                self.folio_client.httpx_client = temp_client
-                return await self.get_job_status()
+        except (httpx.ConnectTimeout, httpx.ReadTimeout, httpx.HTTPStatusError) as e:
+            if not hasattr(e, "response") or e.response.status_code in [502, 504]:
+                error_text = e.response.text if hasattr(e, "response") else str(e)
+                logger.warning(f"SERVER ERROR fetching job status: {error_text}. Retrying.")
+                sleep(0.25)
+                with httpx.Client(
+                    timeout=self.current_retry_timeout,
+                    verify=self.folio_client.ssl_verify,
+                ) as temp_client:
+                    self.folio_client.httpx_client = temp_client
+                    return await self.get_job_status()
+            else:
+                raise e
         try:
             status = [
                 job for job in job_status["jobExecutions"] if job["id"] == self.job_id
@@ -180,16 +208,32 @@ class MARCImportJob:
             self.pbar_imported.update(status["progress"]["current"] - self.last_current)
             self.last_current = status["progress"]["current"]
         except IndexError:
-            job_status = self.folio_client.folio_get(
-                "/metadata-provider/jobExecutions?limit=100&sortBy=completed_date%2Cdesc&statusAny"
-                "=COMMITTED&statusAny=ERROR&statusAny=CANCELLED"
-            )
-            status = [
-                job for job in job_status["jobExecutions"] if job["id"] == self.job_id
-            ][0]
-            self.pbar_imported.update(status["progress"]["current"] - self.last_current)
-            self.last_current = status["progress"]["current"]
-            self.finished = True
+            try:
+                job_status = self.folio_client.folio_get(
+                    "/metadata-provider/jobExecutions?limit=100&sortBy=completed_date%2Cdesc&statusAny"
+                    "=COMMITTED&statusAny=ERROR&statusAny=CANCELLED"
+                )
+                status = [
+                    job for job in job_status["jobExecutions"] if job["id"] == self.job_id
+                ][0]
+                self.pbar_imported.update(status["progress"]["current"] - self.last_current)
+                self.last_current = status["progress"]["current"]
+                self.finished = True
+            except (httpx.ConnectTimeout, httpx.ReadTimeout, httpx.HTTPStatusError) as e:
+                if not hasattr(e, "response") or e.response.status_code in [502, 504]:
+                    error_text = e.response.text if hasattr(e, "response") else str(e)
+                    logger.warning(
+                        f"SERVER ERROR fetching job status: {error_text}. Retrying."
+                    )
+                    sleep(0.25)
+                    with httpx.Client(
+                        timeout=self.current_retry_timeout,
+                        verify=self.folio_client.ssl_verify,
+                    ) as temp_client:
+                        self.folio_client.httpx_client = temp_client
+                        return await self.get_job_status()
+                else:
+                    raise e
 
     async def create_folio_import_job(self) -> None:
         """
@@ -209,7 +253,7 @@ class MARCImportJob:
         try:
             create_job.raise_for_status()
         except httpx.HTTPError as e:
-            print(
+            logger.error(
                 "Error creating job: "
                 + str(e)
                 + "\n"
@@ -217,10 +261,15 @@ class MARCImportJob:
             )
             raise e
         self.job_id = create_job.json()["parentJobExecutionId"]
+        logger.info("Created job: " + self.job_id)
 
-    async def get_import_profile(self) -> None:
+    @cached_property
+    def import_profile(self) -> dict:
         """
-        Retrieves the import profile with the specified name.
+        Returns the import profile for the current job execution.
+
+        Returns:
+            dict: The import profile for the current job execution.
         """
         import_profiles = self.folio_client.folio_get(
             "/data-import-profiles/jobProfiles",
@@ -232,7 +281,7 @@ class MARCImportJob:
             for profile in import_profiles
             if profile["name"] == self.import_profile_name
         ][0]
-        self.job_import_profile = profile
+        return profile
 
     async def set_job_profile(self) -> None:
         """
@@ -248,15 +297,15 @@ class MARCImportJob:
             + "/jobProfile",
             headers=self.folio_client.okapi_headers,
             json={
-                "id": self.job_import_profile["id"],
-                "name": self.job_import_profile["name"],
+                "id": self.import_profile["id"],
+                "name": self.import_profile["name"],
                 "dataType": "MARC",
             },
         )
         try:
             set_job_profile.raise_for_status()
         except httpx.HTTPError as e:
-            print(
+            logger.error(
                 "Error creating job: "
                 + str(e)
                 + "\n"
@@ -277,7 +326,7 @@ class MARCImportJob:
         total_records = 0
         for import_file in files:
             while True:
-                chunk = import_file.read(1024)
+                chunk = import_file.read(104857600)
                 if not chunk:
                     break
                 total_records += chunk.count(b"\x1d")
@@ -291,24 +340,40 @@ class MARCImportJob:
         Args:
             batch_payload (dict): A records payload containing the current batch of MARC records.
         """
-        post_batch = self.http_client.post(
-            self.folio_client.okapi_url
-            + f"/change-manager/jobExecutions/{self.job_id}/records",
-            headers=self.folio_client.okapi_headers,
-            json=batch_payload,
-        )
+        try:
+            post_batch = self.http_client.post(
+                self.folio_client.okapi_url
+                + f"/change-manager/jobExecutions/{self.job_id}/records",
+                headers=self.folio_client.okapi_headers,
+                json=batch_payload,
+            )
+            # if batch_payload["recordsMetadata"]["last"]:
+            #     logger.log(
+            #         25,
+            #         f"Sending last batch of {batch_payload['recordsMetadata']['total']} records.",
+            #     )
+        except (httpx.ConnectTimeout, httpx.ReadTimeout):
+            sleep(0.25)
+            return await self.process_record_batch(batch_payload)
         try:
             post_batch.raise_for_status()
             self.total_records_sent += len(self.record_batch)
             self.record_batch = []
             self.pbar_sent.update(len(batch_payload["initialRecords"]))
         except Exception as e:
-            print("Error posting batch: " + str(e))
-            for record in self.record_batch:
-                self.failed_batches_file.write(record)
-                self.error_records += len(self.record_batch)
-                self.pbar_sent.total = self.pbar_sent.total - len(self.record_batch)
-            self.record_batch = []
+            if (
+                hasattr(e, "response") and e.response.status_code in [500, 422]
+            ):  # TODO: #26 Check for specific error code once https://folio-org.atlassian.net/browse/MODSOURMAN-1281 is resolved
+                self.total_records_sent += len(self.record_batch)
+                self.record_batch = []
+                self.pbar_sent.update(len(batch_payload["initialRecords"]))
+            else:
+                logger.error("Error posting batch: " + str(e))
+                for record in self.record_batch:
+                    self.failed_batches_file.write(record)
+                    self.error_records += len(self.record_batch)
+                    self.pbar_sent.total = self.pbar_sent.total - len(self.record_batch)
+                self.record_batch = []
         sleep(self.batch_delay)
 
     async def process_records(self, files, total_records) -> None:
@@ -325,14 +390,20 @@ class MARCImportJob:
         """
         counter = 0
         for import_file in files:
+            file_path = Path(import_file.name)
             self.pbar_sent.set_description(
                 f"Sent ({os.path.basename(import_file.name)}): "
             )
             reader = pymarc.MARCReader(import_file, hide_utf8_warnings=True)
-            for record in reader:
+            for idx, record in enumerate(reader, start=1):
                 if len(self.record_batch) == self.batch_size:
                     await self.process_record_batch(
-                        await self.create_batch_payload(counter, total_records, False),
+                        await self.create_batch_payload(
+                            counter,
+                            total_records,
+                            (counter - self.error_records)
+                            == (total_records - self.error_records),
+                        ),
                     )
                     await self.get_job_status()
                     sleep(0.25)
@@ -344,14 +415,35 @@ class MARCImportJob:
                     self.record_batch.append(record.as_marc())
                     counter += 1
                 else:
+                    logger.data_issues(
+                        "RECORD FAILED\t%s\t%s\t%s",
+                        f"{file_path.name}:{idx}",
+                        f"Error reading {idx} record from {file_path}. Skipping. Writing current chunk to {self.bad_records_file.name}.",
+                        "",
+                    )
                     self.bad_records_file.write(reader.current_chunk)
             if self.record_batch:
                 await self.process_record_batch(
-                    await self.create_batch_payload(counter, total_records, True),
+                    await self.create_batch_payload(
+                        counter,
+                        total_records,
+                        (counter - self.error_records)
+                        == (total_records - self.error_records),
+                    ),
                 )
+            import_complete_path = file_path.parent.joinpath("import_complete")
+            if import_complete_path.exists():
+                logger.debug(f"Creating import_complete directory: {import_complete_path.absolute()}")
+                import_complete_path.mkdir(exist_ok=True)
+            logger.debug(f"Moving {file_path} to {import_complete_path.absolute()}")
+            file_path.rename(
+                file_path.parent.joinpath("import_complete", file_path.name)
+            )
 
     @staticmethod
-    async def apply_marc_record_preprocessing(record: pymarc.Record, func_or_path) -> pymarc.Record:
+    async def apply_marc_record_preprocessing(
+        record: pymarc.Record, func_or_path
+    ) -> pymarc.Record:
         """
         Apply preprocessing to the MARC record before sending it to FOLIO.
 
@@ -364,23 +456,29 @@ class MARCImportJob:
         """
         if isinstance(func_or_path, str):
             try:
-                path_parts = func_or_path.rsplit('.')
+                path_parts = func_or_path.rsplit(".")
                 module_path, func_name = ".".join(path_parts[:-1]), path_parts[-1]
                 module = importlib.import_module(module_path)
                 func = getattr(module, func_name)
             except (ImportError, AttributeError) as e:
-                print(f"Error importing preprocessing function {func_or_path}: {e}. Skipping preprocessing.")
+                logger.error(
+                    f"Error importing preprocessing function {func_or_path}: {e}. Skipping preprocessing."
+                )
                 return record
         elif callable(func_or_path):
             func = func_or_path
         else:
-            print(f"Invalid preprocessing function: {func_or_path}. Skipping preprocessing.")
+            logger.warning(
+                f"Invalid preprocessing function: {func_or_path}. Skipping preprocessing."
+            )
             return record
 
         try:
             return func(record)
         except Exception as e:
-            print(f"Error applying preprocessing function: {e}. Skipping preprocessing.")
+            logger.error(
+                f"Error applying preprocessing function: {e}. Skipping preprocessing."
+            )
             return record
 
     async def create_batch_payload(self, counter, total_records, is_last) -> dict:
@@ -425,24 +523,26 @@ class MARCImportJob:
             None
         """
         await self.create_folio_import_job()
-        await self.get_import_profile()
         await self.set_job_profile()
         with ExitStack() as stack:
             files = [
                 stack.enter_context(open(file, "rb")) for file in self.current_file
             ]
             total_records = await self.read_total_records(files)
-            with tqdm(
-                desc="Imported: ",
-                total=total_records,
-                position=1,
-                disable=self.no_progress,
-            ) as pbar_imported, tqdm(
-                desc="Sent: ()",
-                total=total_records,
-                position=0,
-                disable=self.no_progress,
-            ) as pbar_sent:
+            with (
+                tqdm(
+                    desc="Imported: ",
+                    total=total_records,
+                    position=1,
+                    disable=self.no_progress,
+                ) as pbar_imported,
+                tqdm(
+                    desc="Sent: ()",
+                    total=total_records,
+                    position=0,
+                    disable=self.no_progress,
+                ) as pbar_sent,
+            ):
                 self.pbar_sent = pbar_sent
                 self.pbar_imported = pbar_imported
                 await self.process_records(files, total_records)
@@ -450,34 +550,39 @@ class MARCImportJob:
                     await self.get_job_status()
                 sleep(1)
             if self.finished:
-                job_summary = await self.get_job_summary()
-                job_summary.pop("jobExecutionId")
-                job_summary.pop("totalErrors")
-                columns = ["Summary"] + list(job_summary.keys())
-                rows = set()
-                for key in columns[1:]:
-                    rows.update(job_summary[key].keys())
+                if job_summary := await self.get_job_summary():
+                    job_id = job_summary.pop("jobExecutionId", None)
+                    total_errors = job_summary.pop("totalErrors", 0)
+                    columns = ["Summary"] + list(job_summary.keys())
+                    rows = set()
+                    for key in columns[1:]:
+                        rows.update(job_summary[key].keys())
 
-                table_data = []
-                for row in rows:
-                    metric_name = decamelize(row).split("_")[1]
-                    table_row = [metric_name]
-                    for col in columns[1:]:
-                        table_row.append(job_summary[col].get(row, "N/A"))
-                    table_data.append(table_row)
-                table_data.sort(key=lambda x: REPORT_SUMMARY_ORDERING.get(x[0], 99))
-                columns = columns[:1] + [
-                    " ".join(decamelize(x).split("_")[:-1]) for x in columns[1:]
-                ]
-                print(
-                    f"Results for {'file' if len(self.current_file) == 1 else 'files'}: "
-                    f"{', '.join([os.path.basename(x.name) for x in self.current_file])}"
-                )
-                print(
-                    tabulate.tabulate(
-                        table_data, headers=columns, tablefmt="fancy_grid"
-                    ),
-                )
+                    table_data = []
+                    for row in rows:
+                        metric_name = decamelize(row).split("_")[1]
+                        table_row = [metric_name]
+                        for col in columns[1:]:
+                            table_row.append(job_summary[col].get(row, "N/A"))
+                        table_data.append(table_row)
+                    table_data.sort(key=lambda x: REPORT_SUMMARY_ORDERING.get(x[0], 99))
+                    columns = columns[:1] + [
+                        " ".join(decamelize(x).split("_")[:-1]) for x in columns[1:]
+                    ]
+                    logger.info(
+                        f"Results for {'file' if len(self.current_file) == 1 else 'files'}: "
+                        f"{', '.join([os.path.basename(x.name) for x in self.current_file])}"
+                    )
+                    logger.info(
+                        "\n"
+                        + tabulate.tabulate(
+                            table_data, headers=columns, tablefmt="fancy_grid"
+                        ),
+                    )
+                    if total_errors:
+                        logger.info(f"Total errors: {total_errors}. Job ID: {job_id}.")
+                else:
+                    logger.error(f"No job summary available for job {self.job_id}.")
             self.last_current = 0
             self.finished = False
 
@@ -490,21 +595,84 @@ class MARCImportJob:
         """
         try:
             self.current_retry_timeout = (
-                self.current_retry_timeout * RETRY_TIMEOUT_RETRY_FACTOR
-            ) if self.current_retry_timeout else RETRY_TIMEOUT_START
-            job_summary = self.folio_client.folio_get(
-                f"/metadata-provider/jobSummary/{self.job_id}"
+                (self.current_retry_timeout * RETRY_TIMEOUT_RETRY_FACTOR)
+                if self.current_retry_timeout
+                else RETRY_TIMEOUT_START
             )
-            self.current_retry_timeout = None
-        except httpx.ReadTimeout:  #
-            sleep(.25)
             with httpx.Client(
-                timeout=self.current_retry_timeout,
-                verify=self.folio_client.ssl_verify
+                timeout=self.current_retry_timeout, verify=self.folio_client.ssl_verify
             ) as temp_client:
                 self.folio_client.httpx_client = temp_client
-                return await self.get_job_summary()
+                job_summary = self.folio_client.folio_get(
+                    f"/metadata-provider/jobSummary/{self.job_id}"
+                )
+            self.current_retry_timeout = None
+        except (httpx.ConnectTimeout, httpx.ReadTimeout, httpx.HTTPStatusError) as e:
+            error_text = e.response.text if hasattr(e, "response") else str(e)
+            if not hasattr(e, "response") or (
+                e.response.status_code in [502, 504] and not self.let_summary_fail
+            ):
+                logger.warning(f"SERVER ERROR fetching job summary: {e}. Retrying.")
+                sleep(0.25)
+                with httpx.Client(
+                    timeout=self.current_retry_timeout,
+                    verify=self.folio_client.ssl_verify,
+                ) as temp_client:
+                    self.folio_client.httpx_client = temp_client
+                    return await self.get_job_summary()
+            elif hasattr(e, "response") and (
+                e.response.status_code in [502, 504] and self.let_summary_fail
+            ):
+                logger.warning(
+                    f"SERVER ERROR fetching job summary: {error_text}. Skipping final summary check."
+                )
+                job_summary = {}
+            else:
+                raise e
         return job_summary
+
+
+def set_up_cli_logging():
+    """
+    This function sets up logging for the CLI.
+    """
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
+
+    # Set up file and stream handlers
+    file_handler = logging.FileHandler(
+        "folio_data_import_{}.log".format(dt.now().strftime("%Y%m%d%H%M%S"))
+    )
+    file_handler.setLevel(logging.INFO)
+    file_handler.addFilter(ExcludeLevelFilter(DATA_ISSUE_LVL_NUM))
+    # file_handler.addFilter(IncludeLevelFilter(25))
+    file_formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
+    file_handler.setFormatter(file_formatter)
+    logger.addHandler(file_handler)
+
+    if not any(
+        isinstance(h, logging.StreamHandler) and h.stream == sys.stderr
+        for h in logger.handlers
+    ):
+        stream_handler = logging.StreamHandler(sys.stdout)
+        stream_handler.setLevel(logging.INFO)
+        stream_handler.addFilter(ExcludeLevelFilter(DATA_ISSUE_LVL_NUM))
+        # stream_handler.addFilter(ExcludeLevelFilter(25))
+        stream_formatter = logging.Formatter("%(message)s")
+        stream_handler.setFormatter(stream_formatter)
+        logger.addHandler(stream_handler)
+
+    # Set up data issues logging
+    data_issues_handler = logging.FileHandler(
+        "marc_import_data_issues_{}.log".format(dt.now().strftime("%Y%m%d%H%M%S"))
+    )
+    data_issues_handler.setLevel(26)
+    data_issues_formatter = logging.Formatter("%(message)s")
+    data_issues_handler.setFormatter(data_issues_formatter)
+    logger.addHandler(data_issues_handler)
+
+    # Stop httpx from logging info messages to the console
+    logging.getLogger("httpx").setLevel(logging.WARNING)
 
 
 async def main() -> None:
@@ -514,6 +682,7 @@ async def main() -> None:
     This function parses command line arguments, initializes the FolioClient,
     and runs the MARCImportJob.
     """
+    set_up_cli_logging()
     parser = argparse.ArgumentParser()
     parser.add_argument("--gateway_url", type=str, help="The FOLIO API Gateway URL")
     parser.add_argument("--tenant_id", type=str, help="The FOLIO tenant ID")
@@ -570,6 +739,11 @@ async def main() -> None:
         action="store_true",
         help="Disable progress bars (eg. for running in a CI environment)",
     )
+    parser.add_argument(
+        "--let-summary-fail",
+        action="store_true",
+        help="Do not retry fetching the final job summary if it fails",
+    )
     args = parser.parse_args()
     if not args.password:
         args.password = getpass("Enter FOLIO password: ")
@@ -586,11 +760,13 @@ async def main() -> None:
     else:
         marc_files = list(Path("./").glob(args.marc_file_path))
 
+    marc_files.sort()
+
     if len(marc_files) == 0:
-        print(f"No files found matching {args.marc_file_path}. Exiting.")
+        logger.critical(f"No files found matching {args.marc_file_path}. Exiting.")
         sys.exit(1)
     else:
-        print(marc_files)
+        logger.info(marc_files)
 
     if not args.import_profile_name:
         import_profiles = folio_client.folio_get(
@@ -622,10 +798,29 @@ async def main() -> None:
             marc_record_preprocessor=args.preprocessor,
             consolidate=bool(args.consolidate),
             no_progress=bool(args.no_progress),
+            let_summary_fail=bool(args.let_summary_fail),
         ).do_work()
     except Exception as e:
-        print("Error importing files: " + str(e))
+        logger.error("Error importing files: " + str(e))
         raise
+
+
+class ExcludeLevelFilter(logging.Filter):
+    def __init__(self, level):
+        super().__init__()
+        self.level = level
+
+    def filter(self, record):
+        return record.levelno != self.level
+
+
+class IncludeLevelFilter(logging.Filter):
+    def __init__(self, level):
+        super().__init__()
+        self.level = level
+
+    def filter(self, record):
+        return record.levelno == self.level
 
 
 def sync_main() -> None:

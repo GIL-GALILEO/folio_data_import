@@ -5,6 +5,7 @@ import getpass
 import json
 import os
 import time
+import uuid
 from datetime import datetime as dt
 from pathlib import Path
 from typing import Tuple
@@ -94,48 +95,31 @@ class UserImporter:  # noqa: R0902
         """
         return {x[name]: x["id"] for x in folio_client.folio_get_all(endpoint, key)}
 
-    def validate_users(self, users: list) -> None:
+    @staticmethod
+    def validate_uuid(uuid_string: str) -> bool:
         """
-        Validates the structure of user records.
+        Validate a UUID string.
 
         Args:
-            users (list): A list of user records loaded from the JSON file.
+            uuid_string (str): The UUID string to validate.
 
-        Raises:
-            ValueError: If the user structure is invalid.
+        Returns:
+            bool: True if the UUID is valid, otherwise False.
         """
-        required_fields = ["externalSystemId", "username", "personal", "patronGroup"]
-
-        for idx, user in enumerate(users):
-            if not all(field in user for field in required_fields):
-                raise ValueError(f"User at line {idx + 1} is missing required fields.")
-            if "personal" in user and not isinstance(user["personal"], dict):
-                raise ValueError(f"User at line {idx + 1}: 'personal' should be a dictionary.")
-
-        print(f"Successfully validated {len(users)} user records.")
+        try:
+            uuid.UUID(uuid_string)
+            return True
+        except ValueError:
+            return False
 
     async def do_import(self) -> None:
         """
         Main method to import users.
 
         This method triggers the process of importing users by calling the `process_file` method.
-        It also validates the structure of the user JSON file before processing.
         """
         if self.user_file_path:
             with open(self.user_file_path, "r", encoding="utf-8") as openfile:
-                # Validate JSON structure before processing
-                try:
-                    users = [json.loads(line) for line in openfile]
-                    self.validate_users(users)
-                except json.JSONDecodeError as e:
-                    print(f"Error: Invalid JSON format in the input file. {e}")
-                    return
-                except Exception as e:
-                    print(f"Error reading user file: {e}")
-                    return
-
-                # Reset the file pointer to the beginning before processing
-                openfile.seek(0)
                 await self.process_file(openfile)
         else:
             raise FileNotFoundError("No user objects file provided")
@@ -237,10 +221,20 @@ class UserImporter:  # noqa: R0902
             mapped_addresses = []
             for address in addresses:
                 try:
-                    address["addressTypeId"] = self.address_type_map[
-                        address["addressTypeId"]
-                    ]
-                    mapped_addresses.append(address)
+                    if (
+                        self.validate_uuid(address["addressTypeId"])
+                        and address["addressTypeId"] in self.address_type_map.values()
+                    ):
+                        await self.logfile.write(
+                            f"Row {line_number}: Address type {address['addressTypeId']} is a UUID, "
+                            f"skipping mapping\n"
+                        )
+                        mapped_addresses.append(address)
+                    else:
+                        address["addressTypeId"] = self.address_type_map[
+                            address["addressTypeId"]
+                        ]
+                        mapped_addresses.append(address)
                 except KeyError:
                     if address["addressTypeId"] not in self.address_type_map.values():
                         print(
@@ -266,7 +260,16 @@ class UserImporter:  # noqa: R0902
             None
         """
         try:
-            user_obj["patronGroup"] = self.patron_group_map[user_obj["patronGroup"]]
+            if (
+                self.validate_uuid(user_obj["patronGroup"])
+                and user_obj["patronGroup"] in self.patron_group_map.values()
+            ):
+                await self.logfile.write(
+                    f"Row {line_number}: Patron group {user_obj['patronGroup']} is a UUID, "
+                    f"skipping mapping\n"
+                )
+            else:
+                user_obj["patronGroup"] = self.patron_group_map[user_obj["patronGroup"]]
         except KeyError:
             if user_obj["patronGroup"] not in self.patron_group_map.values():
                 print(
@@ -293,7 +296,16 @@ class UserImporter:  # noqa: R0902
         mapped_departments = []
         for department in user_obj.pop("departments", []):
             try:
-                mapped_departments.append(self.department_map[department])
+                if (
+                    self.validate_uuid(department)
+                    and department in self.department_map.values()
+                ):
+                    await self.logfile.write(
+                        f"Row {line_number}: Department {department} is a UUID, skipping mapping\n"
+                    )
+                    mapped_departments.append(department)
+                else:
+                    mapped_departments.append(self.department_map[department])
             except KeyError:
                 print(
                     f'Row {line_number}: Department "{department}" not found, '  # noqa: B907
@@ -711,7 +723,13 @@ class UserImporter:  # noqa: R0902
             mapped_service_points = []
             for sp in spu_obj.pop("servicePointsIds", []):
                 try:
-                    mapped_service_points.append(self.service_point_map[sp])
+                    if self.validate_uuid(sp) and sp in self.service_point_map.values():
+                        await self.logfile.write(
+                            f"Service point {sp} is a UUID, skipping mapping\n"
+                        )
+                        mapped_service_points.append(sp)
+                    else:
+                        mapped_service_points.append(self.service_point_map[sp])
                 except KeyError:
                     print(
                         f'Service point "{sp}" not found, excluding service point from user: '
@@ -722,7 +740,13 @@ class UserImporter:  # noqa: R0902
         if "defaultServicePointId" in spu_obj:
             sp_code = spu_obj.pop('defaultServicePointId', '')
             try:
-                mapped_sp_id = self.service_point_map[sp_code]
+                if self.validate_uuid(sp_code) and sp_code in self.service_point_map.values():
+                    await self.logfile.write(
+                        f"Default service point {sp_code} is a UUID, skipping mapping\n"
+                    )
+                    mapped_sp_id = sp_code
+                else:
+                    mapped_sp_id = self.service_point_map[sp_code]
                 if mapped_sp_id not in spu_obj.get('servicePointsIds', []):
                     print(
                         f'Default service point "{sp_code}" not found in assigned service points, '
@@ -745,7 +769,7 @@ class UserImporter:  # noqa: R0902
             existing_spu (dict): The existing service-points-user object, if it exists.
             existing_user (dict): The existing user object associated with the spu_obj.
         """
-        if spu_obj is not None:
+        if spu_obj:
             await self.map_service_points(spu_obj, existing_user)
             if existing_spu:
                 await self.update_existing_spu(spu_obj, existing_spu)
@@ -937,38 +961,16 @@ async def main() -> None:
     limit_async_requests = asyncio.Semaphore(args.limit_async_requests)
     batch_size = args.batch_size
 
-    try:
-        folio_client = folioclient.FolioClient(
-            args.okapi_url,
-            args.tenant_id,
-            args.username,
-            args.folio_password
-            or os.environ.get("FOLIO_PASS", "")
-            or getpass.getpass("Enter your FOLIO password: "),
-        )
-    except httpx.HTTPStatusError as e:
-        response_content = ""
-        try:
-            response_content = e.response.content.decode('utf-8').strip()
-        except UnicodeDecodeError:
-            response_content = str(e.response.content)
-
-        error_message = (
-            f"Failed to initialize FOLIO client: HTTP {e.response.status_code} {e.response.reason_phrase}\n"
-            f"URL: {e.request.url}\n"
-            f"Response content: {response_content}\n"
-            f"More details: https://httpstatuses.com/{e.response.status_code}"
-        )
-        print(error_message)
-        raise Exception(error_message) from e
-
-    except httpx.HTTPError as e:
-        print(f"Error initializing FOLIO client: {e}")
-        raise
-
-    except Exception as e:
-        print(f"Unexpected error initializing FOLIO client: {e}")
-        raise
+    folio_client = folioclient.FolioClient(
+        args.okapi_url,
+        args.tenant_id,
+        args.username,
+        args.folio_password
+        or os.environ.get("FOLIO_PASS", "")
+        or getpass.getpass(
+            "Enter your FOLIO password: ",
+        ),
+    )
 
     # Set the member tenant id if provided to support FOLIO ECS multi-tenant environments
     if args.member_tenant_id:
