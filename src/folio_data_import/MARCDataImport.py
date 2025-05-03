@@ -98,10 +98,12 @@ class MARCImportJob:
         let_summary_fail=False,
         split_files=False,
         split_size=1000,
+        split_offset=0,
     ) -> None:
         self.consolidate_files = consolidate
         self.split_files = split_files
         self.split_size = split_size
+        self.split_offset = split_offset
         if self.split_files and self.consolidate_files:
             raise ValueError("Cannot consolidate and split files at the same time.")
         self.no_progress = no_progress
@@ -119,9 +121,7 @@ class MARCImportJob:
         Performs the necessary work for data import.
 
         This method initializes an HTTP client, files to store records that fail to send,
-        and calls `self.import_marc_records` to import MARC files. If `consolidate_files` is True,
-        it imports all the files specified in `import_files` as a single batch. Otherwise,
-        it imports each file as a separate import job.
+        and calls the appropriate method to import MARC files based on the configuration.
 
         Returns:
             None
@@ -147,25 +147,42 @@ class MARCImportJob:
             logger.info(f"Writing failed batches to {self.failed_batches_file.name}")
             self.http_client = http_client
             if self.consolidate_files:
-                self.current_file = self.import_files
-                await self.import_marc_file()
+                await self.process_consolidated_import()
             elif self.split_files:
-                for file in self.import_files:
-                    with open(file, "rb") as f:
-                        file_length = await self.read_total_records([f])
-                    expected_batches = math.ceil(file_length /self.split_size)
-                    logger.info(f"{file.name} contains {file_length} records. Splitting into {expected_batches} {self.split_size} record batches.")
-                    zero_pad_parts = len(str(expected_batches)) if expected_batches > 1 else 2
-                    for idx, batch in enumerate(self.split_marc_file(file, self.split_size), start=1):
-                        batch.name = f"{file.name}_part{idx:0{zero_pad_parts}}"
-                        self.current_file = [batch]
-                        await self.import_marc_file()
-                    self.move_file_to_complete(file)
+                await self.process_split_files()
             else:
                 for file in self.import_files:
                     self.current_file = [file]
                     await self.import_marc_file()
             await self.wrap_up()
+
+    async def process_split_files(self):
+        """
+        Process the import of files in smaller batches.
+        This method is called when `split_files` is set to True.
+        It splits each file into smaller chunks and processes them one by one.
+        """
+        for file in self.import_files:
+            with open(file, "rb") as f:
+                file_length = await self.read_total_records([f])
+            expected_batches = math.ceil(file_length /self.split_size)
+            logger.info(f"{file.name} contains {file_length} records. Splitting into {expected_batches} {self.split_size} record batches.")
+            zero_pad_parts = len(str(expected_batches)) if expected_batches > 1 else 2
+            for idx, batch in enumerate(self.split_marc_file(file, self.split_size), start=1):
+                if idx > self.split_offset:
+                    batch.name = f"{file.name} (Part {idx:0{zero_pad_parts}})"
+                    self.current_file = [batch]
+                    await self.import_marc_file()
+            self.move_file_to_complete(file)
+
+    async def process_consolidated_import(self):
+        """
+        Process the import of files as a single batch.
+        This method is called when `consolidate_files` is set to True.
+        It creates a single job for all files and processes them together.
+        """
+        self.current_file = self.import_files
+        await self.import_marc_file()
 
     async def wrap_up(self) -> None:
         """
@@ -856,6 +873,12 @@ async def main() -> None:
         help="The number of records to include in each split file.",
         default=1000,
     )
+    parser.add_argument(
+        "--split-offset",
+        type=int,
+        help="The number of record batches of <split-size> to skip before starting import.",
+        default=0,
+    )
 
     parser.add_argument(
         "--no-progress",
@@ -924,6 +947,7 @@ async def main() -> None:
             let_summary_fail=bool(args.let_summary_fail),
             split_files=bool(args.split_files),
             split_size=args.split_size,
+            split_offset=args.split_offset,
         ).do_work()
     except Exception as e:
         logger.error("Error importing files: " + str(e))
