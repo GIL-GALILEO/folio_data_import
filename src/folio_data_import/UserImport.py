@@ -137,7 +137,7 @@ class UserImporter:  # noqa: R0902
         match_key = "id" if ("id" in user_obj) else self.match_key
         try:
             existing_user = await self.http_client.get(
-                self.folio_client.okapi_url + "/users",
+                self.folio_client.gateway_url + "/users",
                 headers=self.folio_client.okapi_headers,
                 params={"query": f"{match_key}=={user_obj[match_key]}"},
             )
@@ -161,7 +161,7 @@ class UserImporter:  # noqa: R0902
         """
         try:
             existing_rp = await self.http_client.get(
-                self.folio_client.okapi_url
+                self.folio_client.gateway_url
                 + "/request-preference-storage/request-preference",
                 headers=self.folio_client.okapi_headers,
                 params={
@@ -188,7 +188,7 @@ class UserImporter:  # noqa: R0902
         """
         try:
             existing_pu = await self.http_client.get(
-                self.folio_client.okapi_url + "/perms/users",
+                self.folio_client.gateway_url + "/perms/users",
                 headers=self.folio_client.okapi_headers,
                 params={
                     "query": f"userId=={existing_user.get('id', user_obj.get('id', ''))}"
@@ -369,7 +369,7 @@ class UserImporter:  # noqa: R0902
             else:
                 existing_user[key] = value
         create_update_user = await self.http_client.put(
-            self.folio_client.okapi_url + f"/users/{existing_user['id']}",
+            self.folio_client.gateway_url + f"/users/{existing_user['id']}",
             headers=self.folio_client.okapi_headers,
             json=existing_user,
         )
@@ -389,7 +389,7 @@ class UserImporter:  # noqa: R0902
             HTTPError: If the HTTP request to create the user fails.
         """
         response = await self.http_client.post(
-            self.folio_client.okapi_url + "/users",
+            self.folio_client.gateway_url + "/users",
             headers=self.folio_client.okapi_headers,
             json=user_obj,
         )
@@ -589,7 +589,7 @@ class UserImporter:  # noqa: R0902
         rp_obj["userId"] = new_user_obj["id"]
         # print(rp_obj)
         response = await self.http_client.post(
-            self.folio_client.okapi_url
+            self.folio_client.gateway_url
             + "/request-preference-storage/request-preference",
             headers=self.folio_client.okapi_headers,
             json=rp_obj,
@@ -613,7 +613,7 @@ class UserImporter:  # noqa: R0902
         existing_rp.update(rp_obj)
         # print(existing_rp)
         response = await self.http_client.put(
-            self.folio_client.okapi_url
+            self.folio_client.gateway_url
             + f"/request-preference-storage/request-preference/{existing_rp['id']}",
             headers=self.folio_client.okapi_headers,
             json=existing_rp,
@@ -635,7 +635,7 @@ class UserImporter:  # noqa: R0902
         """
         perms_user_obj = {"userId": new_user_obj["id"], "permissions": []}
         response = await self.http_client.post(
-            self.folio_client.okapi_url + "/perms/users",
+            self.folio_client.gateway_url + "/perms/users",
             headers=self.folio_client.okapi_headers,
             json=perms_user_obj,
         )
@@ -788,7 +788,7 @@ class UserImporter:  # noqa: R0902
         """
         try:
             existing_spu = await self.http_client.get(
-                self.folio_client.okapi_url + "/service-points-users",
+                self.folio_client.gateway_url + "/service-points-users",
                 headers=self.folio_client.okapi_headers,
                 params={"query": f"userId=={existing_user['id']}"},
             )
@@ -812,7 +812,7 @@ class UserImporter:  # noqa: R0902
         """
         spu_obj["userId"] = existing_user["id"]
         response = await self.http_client.post(
-            self.folio_client.okapi_url + "/service-points-users",
+            self.folio_client.gateway_url + "/service-points-users",
             headers=self.folio_client.okapi_headers,
             json=spu_obj,
         )
@@ -831,7 +831,7 @@ class UserImporter:  # noqa: R0902
         """
         existing_spu.update(spu_obj)
         response = await self.http_client.put(
-            self.folio_client.okapi_url + f"/service-points-users/{existing_spu['id']}",
+            self.folio_client.gateway_url + f"/service-points-users/{existing_spu['id']}",
             headers=self.folio_client.okapi_headers,
             json=existing_spu,
         )
