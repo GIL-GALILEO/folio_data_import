@@ -293,7 +293,7 @@ class MARCImportJob:
         """
         try:
             create_job = self.http_client.post(
-                self.folio_client.okapi_url + "/change-manager/jobExecutions",
+                self.folio_client.gateway_url + "/change-manager/jobExecutions",
                 headers=self.folio_client.okapi_headers,
                 json={"sourceType": "ONLINE", "userId": self.folio_client.current_user},
             )
@@ -342,7 +342,7 @@ class MARCImportJob:
             The response from the HTTP request to set the job profile.
         """
         set_job_profile = self.http_client.put(
-            self.folio_client.okapi_url
+            self.folio_client.gateway_url
             + "/change-manager/jobExecutions/"
             + self.job_id
             + "/jobProfile",
@@ -396,7 +396,7 @@ class MARCImportJob:
         """
         try:
             post_batch = self.http_client.post(
-                self.folio_client.okapi_url
+                self.folio_client.gateway_url
                 + f"/change-manager/jobExecutions/{self.job_id}/records",
                 headers=self.folio_client.okapi_headers,
                 json=batch_payload,
