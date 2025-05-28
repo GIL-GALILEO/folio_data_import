@@ -517,29 +517,19 @@ class UserImporter:  # noqa: R0902
         """
         protected_fields = {}
         protected_fields_list = existing_user.get("customFields", {}).get("protectedFields", "").split(",")
-        for field in protected_fields_list:
-            if len(field.split(".")) > 1:
-                field, subfield = field.split(".")
-                if field not in protected_fields:
-                    protected_fields[field] = {}
-                protected_fields[field][subfield] = existing_user.get(field, {}).pop(subfield, None)
-                if protected_fields[field][subfield] is None:
-                    protected_fields[field].pop(subfield)
-            else:
-                protected_fields[field] = existing_user.pop(field, None)
-                if protected_fields[field] is None:
-                    protected_fields.pop(field)
-        for field in self.fields_to_protect:
+        cli_fields = list(self.fields_to_protect)
+        # combine and dedupe:
+        all_fields = list(dict.fromkeys(protected_fields_list + cli_fields))
+        for field in all_fields:
             if "." in field:
                 fld, subfld = field.split(".", 1)
-                protected_fields.setdefault(fld, {})[subfld] = \
-                    existing_user.get(fld, {}).pop(subfld, None)
-                if protected_fields[fld][subfld] is None:
-                    protected_fields[fld].pop(subfld)
+                val = existing_user.get(fld, {}).pop(subfld, None)
+                if val is not None:
+                    protected_fields.setdefault(fld, {})[subfld] = val
             else:
-                protected_fields[field] = existing_user.pop(field, None)
-                if protected_fields[field] is None:
-                    protected_fields.pop(field)
+                val = existing_user.pop(field, None)
+                if val is not None:
+                    protected_fields[field] = val
         return protected_fields
 
     async def process_existing_user(self, user_obj) -> Tuple[dict, dict, dict, dict]:
