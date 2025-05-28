@@ -902,6 +902,7 @@ async def main() -> None:
         --update_only_present_fields (bool): Only update fields that are present in the new user object.
         --default_preferred_contact_type (str): The default preferred contact type to use if the provided \
             value is not valid or not present. Default "002".
+        --fields_to_protect (str): Comma-separated list of top-level or nested (dot-notation) fields to protect.
 
     Raises:
         Exception: If an unknown error occurs during the import process.
@@ -969,7 +970,7 @@ async def main() -> None:
         default="",
     )
     args = parser.parse_args()
-    fields_to_protect = [
+    protect_fields = [
         f.strip() for f in args.fields_to_protect.split(",")
         if f.strip()
     ]
@@ -1024,7 +1025,7 @@ async def main() -> None:
                 args.user_match_key,
                 args.update_only_present_fields,
                 args.default_preferred_contact_type,
-                fields_to_protect=fields_to_protect,
+                fields_to_protect=protect_fields,
             )
             await importer.do_import()
         except Exception as ee:
