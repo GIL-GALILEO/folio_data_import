@@ -336,12 +336,6 @@ class UserImporter:  # noqa: R0902
             None
 
         """
-        #  protect top-level fields listed in self.fields_to_protect
-        saved_fields = {}
-        for fld in self.fields_to_protect:
-            if fld in existing_user:
-                saved_fields[fld] = existing_user[fld]
-                user_obj.pop(fld, None)
 
         await self.set_preferred_contact_type(user_obj, existing_user)
         preferred_contact_type = {"preferredContactTypeId": existing_user.get("personal", {}).pop("preferredContactTypeId")}
@@ -365,11 +359,6 @@ class UserImporter:  # noqa: R0902
                 existing_user["personal"] = existing_personal
         else:
             existing_user.update(user_obj)
-
-        # restore protected top-level fields
-        for fld, val in saved_fields.items():
-            existing_user[fld] = val
-
         if "personal" in existing_user:
             existing_user["personal"].update(preferred_contact_type)
         else:
@@ -516,7 +505,9 @@ class UserImporter:  # noqa: R0902
 
     async def get_protected_fields(self, existing_user) -> dict:
         """
-        Retrieves the protected fields from the existing user object.
+        Retrieves the protected fields from the existing user object,
+        combining both the customFields.protectedFields list *and*
+        any fields_to_protect passed on the CLI.
 
         Args:
             existing_user (dict): The existing user object.
@@ -534,6 +525,17 @@ class UserImporter:  # noqa: R0902
                 protected_fields[field][subfield] = existing_user.get(field, {}).pop(subfield, None)
                 if protected_fields[field][subfield] is None:
                     protected_fields[field].pop(subfield)
+            else:
+                protected_fields[field] = existing_user.pop(field, None)
+                if protected_fields[field] is None:
+                    protected_fields.pop(field)
+        for field in self.fields_to_protect:
+            if "." in field:
+                fld, subfld = field.split(".", 1)
+                protected_fields.setdefault(fld, {})[subfld] = \
+                    existing_user.get(fld, {}).pop(subfld, None)
+                if protected_fields[fld][subfld] is None:
+                    protected_fields[fld].pop(subfld)
             else:
                 protected_fields[field] = existing_user.pop(field, None)
                 if protected_fields[field] is None:
