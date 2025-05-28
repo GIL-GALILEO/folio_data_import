@@ -2,8 +2,8 @@ import argparse
 import asyncio
 import datetime
 import glob
-import importlib
 import io
+import json
 import logging
 import math
 import os
@@ -15,7 +15,7 @@ from functools import cached_property
 from getpass import getpass
 from pathlib import Path
 from time import sleep
-from typing import List, Union
+from typing import Any, BinaryIO, Callable, Dict, List, Union
 
 import folioclient
 import httpx
@@ -24,6 +24,9 @@ import pymarc
 import tabulate
 from humps import decamelize
 from tqdm import tqdm
+
+from folio_data_import.custom_exceptions import FolioDataImportBatchError
+from folio_data_import.marc_preprocessors._preprocessors import MARCPreprocessor
 
 try:
     datetime_utc = datetime.UTC
@@ -63,7 +66,6 @@ class MARCImportJob:
         import_profile_name (str): The name of the data import job profile to use.
         batch_size (int): The number of source records to include in a record batch (default=10).
         batch_delay (float): The number of seconds to wait between record batches (default=0).
-        consolidate (bool): Consolidate files into a single job. Default is one job for each file.
         no_progress (bool): Disable progress bars (eg. for running in a CI environment).
     """
 
@@ -75,7 +77,6 @@ class MARCImportJob:
     http_client: httpx.Client
     current_file: List[Path]
     record_batch: List[dict] = []
-    error_records: int = 0
     last_current: int = 0
     total_records_sent: int = 0
     finished: bool = False
@@ -92,18 +93,17 @@ class MARCImportJob:
         import_profile_name: str,
         batch_size=10,
         batch_delay=0,
-        marc_record_preprocessor=None,
-        consolidate=False,
+        marc_record_preprocessor: Union[List[Callable], str]=[],
+        preprocessor_args: Dict[str,Dict]={},
         no_progress=False,
         let_summary_fail=False,
         split_files=False,
         split_size=1000,
+        split_offset=0,
     ) -> None:
-        self.consolidate_files = consolidate
         self.split_files = split_files
         self.split_size = split_size
-        if self.split_files and self.consolidate_files:
-            raise ValueError("Cannot consolidate and split files at the same time.")
+        self.split_offset = split_offset
         self.no_progress = no_progress
         self.let_summary_fail = let_summary_fail
         self.folio_client: folioclient.FolioClient = folio_client
@@ -112,16 +112,14 @@ class MARCImportJob:
         self.batch_size = batch_size
         self.batch_delay = batch_delay
         self.current_retry_timeout = None
-        self.marc_record_preprocessor = marc_record_preprocessor
+        self.marc_record_preprocessor: MARCPreprocessor = MARCPreprocessor(marc_record_preprocessor, **preprocessor_args)
 
     async def do_work(self) -> None:
         """
         Performs the necessary work for data import.
 
         This method initializes an HTTP client, files to store records that fail to send,
-        and calls `self.import_marc_records` to import MARC files. If `consolidate_files` is True,
-        it imports all the files specified in `import_files` as a single batch. Otherwise,
-        it imports each file as a separate import job.
+        and calls the appropriate method to import MARC files based on the configuration.
 
         Returns:
             None
@@ -146,26 +144,32 @@ class MARCImportJob:
             self.failed_batches_file = failed_batches
             logger.info(f"Writing failed batches to {self.failed_batches_file.name}")
             self.http_client = http_client
-            if self.consolidate_files:
-                self.current_file = self.import_files
-                await self.import_marc_file()
-            elif self.split_files:
-                for file in self.import_files:
-                    with open(file, "rb") as f:
-                        file_length = await self.read_total_records([f])
-                    expected_batches = math.ceil(file_length /self.split_size)
-                    logger.info(f"{file.name} contains {file_length} records. Splitting into {expected_batches} {self.split_size} record batches.")
-                    zero_pad_parts = len(str(expected_batches)) if expected_batches > 1 else 2
-                    for idx, batch in enumerate(self.split_marc_file(file, self.split_size), start=1):
-                        batch.name = f"{file.name}_part{idx:0{zero_pad_parts}}"
-                        self.current_file = [batch]
-                        await self.import_marc_file()
-                    self.move_file_to_complete(file)
+            if self.split_files:
+                await self.process_split_files()
             else:
                 for file in self.import_files:
                     self.current_file = [file]
                     await self.import_marc_file()
             await self.wrap_up()
+
+    async def process_split_files(self):
+        """
+        Process the import of files in smaller batches.
+        This method is called when `split_files` is set to True.
+        It splits each file into smaller chunks and processes them one by one.
+        """
+        for file in self.import_files:
+            with open(file, "rb") as f:
+                file_length = await self.read_total_records([f])
+            expected_batches = math.ceil(file_length /self.split_size)
+            logger.info(f"{file.name} contains {file_length} records. Splitting into {expected_batches} {self.split_size} record batches.")
+            zero_pad_parts = len(str(expected_batches)) if expected_batches > 1 else 2
+            for idx, batch in enumerate(self.split_marc_file(file, self.split_size), start=1):
+                if idx > self.split_offset:
+                    batch.name = f"{file.name} (Part {idx:0{zero_pad_parts}})"
+                    self.current_file = [batch]
+                    await self.import_marc_file()
+            self.move_file_to_complete(file)
 
     async def wrap_up(self) -> None:
         """
@@ -214,7 +218,7 @@ class MARCImportJob:
                 )
                 self.current_retry_timeout = None
         except (httpx.ConnectTimeout, httpx.ReadTimeout, httpx.HTTPStatusError) as e:
-            if not hasattr(e, "response") or e.response.status_code in [502, 504]:
+            if not hasattr(e, "response") or e.response.status_code in [502, 504, 401]:
                 error_text = e.response.text if hasattr(e, "response") else str(e)
                 logger.warning(f"SERVER ERROR fetching job status: {error_text}. Retrying.")
                 sleep(0.25)
@@ -276,7 +280,7 @@ class MARCImportJob:
         """
         try:
             create_job = self.http_client.post(
-                self.folio_client.okapi_url + "/change-manager/jobExecutions",
+                self.folio_client.gateway_url + "/change-manager/jobExecutions",
                 headers=self.folio_client.okapi_headers,
                 json={"sourceType": "ONLINE", "userId": self.folio_client.current_user},
             )
@@ -325,7 +329,7 @@ class MARCImportJob:
             The response from the HTTP request to set the job profile.
         """
         set_job_profile = self.http_client.put(
-            self.folio_client.okapi_url
+            self.folio_client.gateway_url
             + "/change-manager/jobExecutions/"
             + self.job_id
             + "/jobProfile",
@@ -350,7 +354,7 @@ class MARCImportJob:
             raise e
 
     @staticmethod
-    async def read_total_records(files) -> int:
+    async def read_total_records(files: List[BinaryIO]) -> int:
         """
         Reads the total number of records from the given files.
 
@@ -379,17 +383,15 @@ class MARCImportJob:
         """
         try:
             post_batch = self.http_client.post(
-                self.folio_client.okapi_url
+                self.folio_client.gateway_url
                 + f"/change-manager/jobExecutions/{self.job_id}/records",
                 headers=self.folio_client.okapi_headers,
                 json=batch_payload,
             )
-            # if batch_payload["recordsMetadata"]["last"]:
-            #     logger.log(
-            #         25,
-            #         f"Sending last batch of {batch_payload['recordsMetadata']['total']} records.",
-            #     )
         except (httpx.ConnectTimeout, httpx.ReadTimeout):
+            logger.warning(
+                f"CONNECTION ERROR posting batch {batch_payload['id']}. Retrying..."
+            )
             sleep(0.25)
             return await self.process_record_batch(batch_payload)
         try:
@@ -397,20 +399,21 @@ class MARCImportJob:
             self.total_records_sent += len(self.record_batch)
             self.record_batch = []
             self.pbar_sent.update(len(batch_payload["initialRecords"]))
-        except Exception as e:
+        except httpx.HTTPStatusError as e:
             if (
-                hasattr(e, "response") and e.response.status_code in [500, 422]
-            ):  # TODO: #26 Check for specific error code once https://folio-org.atlassian.net/browse/MODSOURMAN-1281 is resolved
+                e.response.status_code in [500, 400, 422]
+            ):  # TODO: Update once we no longer have to support < Sunflower to just be 400
                 self.total_records_sent += len(self.record_batch)
                 self.record_batch = []
                 self.pbar_sent.update(len(batch_payload["initialRecords"]))
             else:
-                logger.error("Error posting batch: " + str(e))
                 for record in self.record_batch:
                     self.failed_batches_file.write(record)
-                    self.error_records += len(self.record_batch)
-                    self.pbar_sent.total = self.pbar_sent.total - len(self.record_batch)
-                self.record_batch = []
+                raise FolioDataImportBatchError(
+                    batch_payload['id'],
+                    f"{e}\n{e.response.text}",
+                    e
+                )
         await self.get_job_status()
         sleep(self.batch_delay)
 
@@ -439,16 +442,12 @@ class MARCImportJob:
                         await self.create_batch_payload(
                             counter,
                             total_records,
-                            (counter - self.error_records)
-                            == (total_records - self.error_records),
+                            counter == total_records,
                         ),
                     )
                     sleep(0.25)
                 if record:
-                    if self.marc_record_preprocessor:
-                        record = await self.apply_marc_record_preprocessing(
-                            record, self.marc_record_preprocessor
-                        )
+                    record = self.marc_record_preprocessor.do_work(record)
                     self.record_batch.append(record.as_marc())
                     counter += 1
                 else:
@@ -459,19 +458,18 @@ class MARCImportJob:
                         "",
                     )
                     self.bad_records_file.write(reader.current_chunk)
-            if self.record_batch:
-                await self.process_record_batch(
-                    await self.create_batch_payload(
-                        counter,
-                        total_records,
-                        (counter - self.error_records)
-                        == (total_records - self.error_records),
-                    ),
-                )
             if not self.split_files:
                 self.move_file_to_complete(file_path)
+        if self.record_batch or not self.finished:
+            await self.process_record_batch(
+                await self.create_batch_payload(
+                    counter,
+                    total_records,
+                    counter == total_records,
+                ),
+            )
 
-    def move_file_to_complete(self, file_path):
+    def move_file_to_complete(self, file_path: Path):
         import_complete_path = file_path.parent.joinpath("import_complete")
         if not import_complete_path.exists():
             logger.debug(f"Creating import_complete directory: {import_complete_path.absolute()}")
@@ -480,58 +478,6 @@ class MARCImportJob:
         file_path.rename(
                 file_path.parent.joinpath("import_complete", file_path.name)
             )
-
-    @staticmethod
-    async def apply_marc_record_preprocessing(
-        record: pymarc.Record, func_or_path
-    ) -> pymarc.Record:
-        """
-        Apply preprocessing to the MARC record before sending it to FOLIO.
-
-        Args:
-            record (pymarc.Record): The MARC record to preprocess.
-            func_or_path (Union[Callable, str]): The preprocessing function or its import path.
-
-        Returns:
-            pymarc.Record: The preprocessed MARC record.
-        """
-        if isinstance(func_or_path, str):
-            func_paths = func_or_path.split(",")
-            for func_path in func_paths:
-                record = await MARCImportJob._apply_single_marc_record_preprocessing_by_path(
-                    record, func_path
-                )
-        elif callable(func_or_path):
-            record = func_or_path(record)
-        else:
-            logger.warning(
-                f"Invalid preprocessing function: {func_or_path}. Skipping preprocessing."
-            )
-        return record
-
-    async def _apply_single_marc_record_preprocessing_by_path(
-        record: pymarc.Record, func_path: str
-    ) -> pymarc.Record:
-        """
-        Apply a single preprocessing function to the MARC record.
-
-        Args:
-            record (pymarc.Record): The MARC record to preprocess.
-            func_path (str): The path to the preprocessing function.
-
-        Returns:
-            pymarc.Record: The preprocessed MARC record.
-        """
-        try:
-            module_path, func_name = func_path.rsplit(".", 1)
-            module = importlib.import_module(module_path)
-            func = getattr(module, func_name)
-            record = func(record)
-        except Exception as e:
-            logger.warning(
-                f"Error applying preprocessing function {func_path}: {e}. Skipping."
-            )
-        return record
 
     async def create_batch_payload(self, counter, total_records, is_last) -> dict:
         """
@@ -549,9 +495,9 @@ class MARCImportJob:
             "id": str(uuid.uuid4()),
             "recordsMetadata": {
                 "last": is_last,
-                "counter": counter - self.error_records,
+                "counter": counter,
                 "contentType": "MARC_RAW",
-                "total": total_records - self.error_records,
+                "total": total_records,
             },
             "initialRecords": [{"record": x.decode()} for x in self.record_batch],
         }
@@ -646,16 +592,46 @@ class MARCImportJob:
                     disable=self.no_progress,
                 ) as pbar_sent,
             ):
-                self.pbar_sent = pbar_sent
-                self.pbar_imported = pbar_imported
-                await self.process_records(files, total_records)
-                while not self.finished:
-                    await self.get_job_status()
-                sleep(1)
+                try:
+                    self.pbar_sent = pbar_sent
+                    self.pbar_imported = pbar_imported
+                    await self.process_records(files, total_records)
+                    while not self.finished:
+                        await self.get_job_status()
+                    sleep(1)
+                except FolioDataImportBatchError as e:
+                    logger.error(
+                        f"Unhandled error posting batch {e.batch_id}: {e.message}"
+                    )
+                    await self.cancel_job()
+                    raise e
             if self.finished:
                 await self.log_job_summary()
             self.last_current = 0
             self.finished = False
+
+    async def cancel_job(self) -> None:
+        """
+        Cancels the current job execution.
+
+        This method sends a request to cancel the job execution and logs the result.
+
+        Returns:
+            None
+        """
+        try:
+            cancel = self.http_client.delete(
+                self.folio_client.gateway_url
+                + f"/change-manager/jobExecutions/{self.job_id}/records",
+                headers=self.folio_client.okapi_headers,
+            )
+            cancel.raise_for_status()
+            self.finished = True
+            logger.info(f"Cancelled job: {self.job_id}")
+        except (httpx.ConnectTimeout, httpx.ReadTimeout):
+            logger.warning(f"CONNECTION ERROR cancelling job {self.job_id}. Retrying...")
+            sleep(0.25)
+            await self.cancel_job()
 
     async def log_job_summary(self):
         if job_summary := await self.get_job_summary():
@@ -835,17 +811,8 @@ async def main() -> None:
         ),
         default=None,
     )
-    # Add mutually exclusive group for consolidate and split-files options
-    group = parser.add_mutually_exclusive_group()
-    group.add_argument(
-        "--consolidate",
-        action="store_true",
-        help=(
-            "Consolidate records into a single job. "
-            "Default is to create a new job for each MARC file."
-        ),
-    )
-    group.add_argument(
+
+    parser.add_argument(
         "--split-files",
         action="store_true",
         help="Split files into smaller parts before importing.",
@@ -855,6 +822,12 @@ async def main() -> None:
         type=int,
         help="The number of records to include in each split file.",
         default=1000,
+    )
+    parser.add_argument(
+        "--split-offset",
+        type=int,
+        help="The number of record batches of <split-size> to skip before starting import.",
+        default=0,
     )
 
     parser.add_argument(
@@ -867,6 +840,16 @@ async def main() -> None:
         action="store_true",
         help="Do not retry fetching the final job summary if it fails",
     )
+    parser.add_argument(
+        "--preprocessor-config",
+        type=str,
+        help=(
+            "JSON file containing configuration for preprocessor functions. "
+            "This is passed to MARCPreprocessor class as a dict of dicts."
+        ),
+        default=None,
+    )
+
     args = parser.parse_args()
     if not args.password:
         args.password = getpass("Enter FOLIO password: ")
@@ -890,6 +873,12 @@ async def main() -> None:
         sys.exit(1)
     else:
         logger.info(marc_files)
+
+    if args.preprocessor_config:
+        with open(args.preprocessor_config, "r") as f:
+            preprocessor_args = json.load(f)
+    else:
+        preprocessor_args = {}
 
     if not args.import_profile_name:
         import_profiles = folio_client.folio_get(
@@ -919,11 +908,12 @@ async def main() -> None:
             batch_size=args.batch_size,
             batch_delay=args.batch_delay,
             marc_record_preprocessor=args.preprocessor,
-            consolidate=bool(args.consolidate),
+            preprocessor_args=preprocessor_args,
             no_progress=bool(args.no_progress),
             let_summary_fail=bool(args.let_summary_fail),
             split_files=bool(args.split_files),
             split_size=args.split_size,
+            split_offset=args.split_offset,
         ).do_work()
     except Exception as e:
         logger.error("Error importing files: " + str(e))
