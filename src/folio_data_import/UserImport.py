@@ -8,7 +8,7 @@ import time
 import uuid
 from datetime import datetime as dt
 from pathlib import Path
-from typing import Tuple
+from typing import Tuple, List
 
 import aiofiles
 import folioclient
@@ -51,7 +51,7 @@ class UserImporter:  # noqa: R0902
         user_match_key: str = "externalSystemId",
         only_update_present_fields: bool = False,
         default_preferred_contact_type: str = "002",
-        protect_fields: list[str] = None,
+        fields_to_protect: List[str] =[],
     ) -> None:
         self.limit_simultaneous_requests = limit_simultaneous_requests
         self.batch_size = batch_size
@@ -78,7 +78,7 @@ class UserImporter:  # noqa: R0902
         self.match_key = user_match_key
         self.lock: asyncio.Lock = asyncio.Lock()
         self.logs: dict = {"created": 0, "updated": 0, "failed": 0}
-        self.protect_fields = set(protect_fields or [])
+        self.fields_to_protect = set(fields_to_protect)
 
     @staticmethod
     def build_ref_data_id_map(
@@ -336,9 +336,9 @@ class UserImporter:  # noqa: R0902
             None
 
         """
-        #  protect top-level fields listed in self.protect_fields
+        #  protect top-level fields listed in self.fields_to_protect
         saved_fields = {}
-        for fld in self.protect_fields:
+        for fld in self.fields_to_protect:
             if fld in existing_user:
                 saved_fields[fld] = existing_user[fld]
                 user_obj.pop(fld, None)
@@ -968,15 +968,19 @@ async def main() -> None:
         default="002",
     )
     parser.add_argument(
-        "--protect-fields",
+        "--fields-to-protect",  # new flag name
+        dest="fields_to_protect",  # sets args.fields_to_protect
         help=(
-            "Comma-separated list of top-level user fields to protect from overwrite "
+            "Comma-separated list of top-level user fields to protect "
             "(e.g. type,expirationDate)"
         ),
         default="",
     )
     args = parser.parse_args()
-    protect_fields = [f.strip() for f in args.protect_fields.split(",") if f.strip()]
+    fields_to_protect = [
+        f.strip() for f in args.fields_to_protect.split(",")
+        if f.strip()
+    ]
 
     library_name = args.library_name
 
@@ -1028,7 +1032,7 @@ async def main() -> None:
                 args.user_match_key,
                 args.update_only_present_fields,
                 args.default_preferred_contact_type,
-                protect_fields=protect_fields,
+                fields_to_protect=fields_to_protect,
             )
             await importer.do_import()
         except Exception as ee:
